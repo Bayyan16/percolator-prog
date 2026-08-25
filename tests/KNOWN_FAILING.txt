@@ -13,6 +13,25 @@
 # 11 of those "failures" were matcher version drift alone: main's 33e1185 restored an
 # lp_pda.is_signer check (BUG-001) that the deployed 585f492 does not have.
 #
+# 2026-08-25 UPDATE: the matcher was redeployed 585f492 -> d4d4f1c (byte-verified) and the
+# CI pin moved with it. d4d4f1c CONTAINS the restored lp_pda.is_signer check, so those 11
+# tests fail again -- this time legitimately, against the bytes actually on chain.
+# Measured: v16_cu = 88 passed / 11 failed.
+#
+# They are NOT a product regression. No production path creates matcher contexts (verified
+# across sdk / launch / keeper / indexer -- only this test harness does), and existing
+# contexts keep working because the fill path already required the signer.
+#
+# They are also NOT fixable in this checkout, which is why they are quarantined rather than
+# repaired: init_matcher_context_with_data must register the wrapper's matcher-delegate PDA
+# as the context authority (the fill path compares against it), and the matcher now requires
+# that same account to sign process_init. A PDA can only be signed via invoke_signed by its
+# owning program, and the wrapper has NO instruction that CPIs matcher init. Fixing it needs
+# either (a) a new wrapper instruction creating the context via invoke_signed, or (b) the
+# harness writing initialized context bytes directly, duplicating the matcher's storage
+# layout into this repo (rot-prone; rejected).
+# Tracked as the "no on-chain path to create a matcher context" gap.
+#
 # Remaining 34, by cause:
 #
 #   19  sol_invoke_signed() not available            [STRUCTURAL - cannot be fixed here]
@@ -62,3 +81,19 @@ x0_stake_flush_to_insurance_at_mainnet
 x2_flush_race_liquidation_crank_order_independent
 x2_flush_race_resolved_market_reverts_mode_not_live
 x5_terminal_reclaim_liveness_via_rotate_no_lockout
+
+#   11  matcher lp_pda.is_signer at process_init        [STRUCTURAL - see header, 2026-08-25]
+#       The deployed matcher (d4d4f1c) requires the context authority to sign init, and that
+#       authority must be the wrapper's matcher-delegate PDA, which only the wrapper can sign
+#       -- and it has no instruction that does.
+v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_matured
+v16_attack_non_base_batchtradecpi_rejects_before_matcher_after_base_resolve_matured
+v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product
+v16_bpf_tradecpi_executes_through_external_matcher_and_is_bounded
+v16_bpf_tradecpi_external_matcher_executes_on_added_asset
+v16_bpf_tradecpi_rejects_off_mark_recycle_when_deficit_cannot_settle
+v16_bpf_tradecpi_rejects_when_counterparty_starts_bankrupt
+v16_bpf_trade_paths_respect_source_credit_watermark_permutations
+v16_fix_w1_matcher_tail_rejects_signer_account
+v16_fix_w2_drain_only_risk_increase_cpi_trade_rejects_before_matcher
+v16_fix_w2_inactive_asset_cpi_trade_rejects_before_matcher
