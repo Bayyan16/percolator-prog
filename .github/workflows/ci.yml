@@ -39,6 +39,11 @@ jobs:
       #
       # The ENGINE is deliberately NOT pinned: it compiles into the wrapper, so main
       # is exactly what we are shipping and what these tests must cover.
+      # NOTE on the nft pin: the DEPLOYED nft commit f18da24 existed only locally -- no
+      # branch on dcccrypto/percolator-nft contained it, so GitHub could not serve it and the
+      # checkout failed. It is now preserved as the branch `deployed/nft-f18da24`, which also
+      # means the bytes running on chain finally have retrievable source.
+      #
       # Sibling refs MUST be full 40-character SHAs. actions/checkout resolves `ref` by
       # running `git fetch origin <ref>`, and an abbreviated SHA is not a valid fetch refspec,
       # so a 7-char pin fails the checkout step outright. This CI had never once gone green
