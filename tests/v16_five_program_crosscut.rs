@@ -707,23 +707,10 @@ impl CrosscutEnv {
                 },
             )
             .unwrap();
-        send_ixs(
-            &mut self.svm,
-            &self.payer,
-            vec![Instruction {
-                program_id: self.matcher_program,
-                accounts: vec![
-                    AccountMeta::new_readonly(delegate, false),
-                    AccountMeta::new(ctx, false),
-                ],
-                data: encode_matcher_init_passive(u128::MAX),
-            }],
-            &[],
-        )
-        .expect("init matcher context");
         // v17: SetMatcherConfig registers the matcher context in the maker's portfolio.
         // Required before TradeCpi: matcher_tail_start_or_verify_lp_config checks
-        // cfg.matcher_program / .matcher_context / .matcher_delegate.
+        // cfg.matcher_program / .matcher_context / .matcher_delegate. It must also run BEFORE
+        // InitMatcherCtx, which requires the triple to be registered already.
         send_ixs(
             &mut self.svm,
             &self.payer,
@@ -742,6 +729,41 @@ impl CrosscutEnv {
             &[maker_owner],
         )
         .expect("set matcher config on maker portfolio");
+
+        // Bootstrap the context through the WRAPPER's InitMatcherCtx (tag 83). Calling the
+        // matcher's process_init directly only works against a matcher missing the BUG-001
+        // lp_pda.is_signer check; the deployed matcher requires the delegate PDA to sign, and
+        // only the wrapper can do that via invoke_signed.
+        send_ixs(
+            &mut self.svm,
+            &self.payer,
+            vec![Instruction {
+                program_id: self.program_id,
+                accounts: vec![
+                    AccountMeta::new(maker_owner_key, true),
+                    AccountMeta::new_readonly(self.market, false),
+                    AccountMeta::new(maker_account, false),
+                    AccountMeta::new(ctx, false),
+                    AccountMeta::new_readonly(self.matcher_program, false),
+                    AccountMeta::new_readonly(delegate, false),
+                ],
+                data: ProgInstruction::InitMatcherCtx {
+                    kind: 0,
+                    trading_fee_bps: 0,
+                    base_spread_bps: 0,
+                    max_total_bps: 100,
+                    impact_k_bps: 0,
+                    liquidity_notional_e6: 0,
+                    max_fill_abs: u128::MAX,
+                    max_inventory_abs: 0,
+                    fee_to_insurance_bps: 0,
+                    skew_spread_mult_bps: 0,
+                }
+                .encode(),
+            }],
+            &[maker_owner],
+        )
+        .expect("init matcher context via wrapper InitMatcherCtx");
         (ctx, delegate)
     }
 
