@@ -1403,22 +1403,10 @@ impl V16CuEnv {
                 },
             )
             .unwrap();
-        let cu = send_raw_tx(
-            &mut self.svm,
-            &self.payer,
-            Instruction {
-                program_id: matcher_program,
-                accounts: vec![
-                    AccountMeta::new_readonly(delegate, false),
-                    AccountMeta::new(ctx, false),
-                ],
-                data: init_data,
-            },
-            &[],
-        )
-        .expect("init matcher context");
-        // Register maker_account as LP portfolio with correct matcher config.
-        // SetMatcherConfig stores the derived delegate so handle_trade_cpi can verify it.
+        // Register maker_account as LP portfolio with the matcher config FIRST.
+        // SetMatcherConfig stores the derived delegate so handle_trade_cpi can verify it,
+        // and InitMatcherCtx requires the (matcher_prog, matcher_ctx, delegate) triple to
+        // already be registered on the LP portfolio.
         send_tx(
             &mut self.svm,
             self.program_id,
@@ -1435,6 +1423,52 @@ impl V16CuEnv {
             &[maker_owner],
         )
         .expect("set matcher config");
+
+        // Bootstrap the context through the WRAPPER's InitMatcherCtx (tag 83), not by
+        // calling the matcher directly. The matcher requires the context authority to sign
+        // process_init, that authority is the wrapper's matcher-delegate PDA, and a PDA can
+        // only sign via invoke_signed by its owning program -- which is exactly what tag 83
+        // does. Calling the matcher directly (as this helper used to) works only against a
+        // matcher build that is missing the lp_pda.is_signer check, i.e. only before
+        // BUG-001 was fixed.
+        // init_data[0] is the matcher's INIT_VAMM tag (2); the kind is at [1]. The wrapper
+        // re-adds the tag itself when it builds the 78-byte CPI payload.
+        let kind = init_data[1];
+        let trading_fee_bps = u32::from_le_bytes(init_data[2..6].try_into().unwrap());
+        let base_spread_bps = u32::from_le_bytes(init_data[6..10].try_into().unwrap());
+        let max_total_bps = u32::from_le_bytes(init_data[10..14].try_into().unwrap());
+        let impact_k_bps = u32::from_le_bytes(init_data[14..18].try_into().unwrap());
+        let liquidity_notional_e6 = u128::from_le_bytes(init_data[18..34].try_into().unwrap());
+        let max_fill_abs = u128::from_le_bytes(init_data[34..50].try_into().unwrap());
+        let max_inventory_abs = u128::from_le_bytes(init_data[50..66].try_into().unwrap());
+
+        let cu = send_tx(
+            &mut self.svm,
+            self.program_id,
+            &self.payer,
+            ProgInstruction::InitMatcherCtx {
+                kind,
+                trading_fee_bps,
+                base_spread_bps,
+                max_total_bps,
+                impact_k_bps,
+                liquidity_notional_e6,
+                max_fill_abs,
+                max_inventory_abs,
+                fee_to_insurance_bps: 0,
+                skew_spread_mult_bps: 0,
+            },
+            vec![
+                AccountMeta::new(maker_owner.pubkey(), true),
+                AccountMeta::new_readonly(self.market, false),
+                AccountMeta::new(maker_account, false),
+                AccountMeta::new(ctx, false),
+                AccountMeta::new_readonly(matcher_program, false),
+                AccountMeta::new_readonly(delegate, false),
+            ],
+            &[maker_owner],
+        )
+        .expect("init matcher context via wrapper InitMatcherCtx");
         (ctx, delegate, cu)
     }
 

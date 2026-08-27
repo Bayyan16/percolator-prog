@@ -13,7 +13,24 @@
 # 11 of those "failures" were matcher version drift alone: main's 33e1185 restored an
 # lp_pda.is_signer check (BUG-001) that the deployed 585f492 does not have.
 #
-# Remaining 34, by cause:
+# 2026-08-25: the matcher was redeployed 585f492 -> d4d4f1c (byte-verified) and the CI pin
+# moved with it. d4d4f1c CONTAINS the restored lp_pda.is_signer check, so those 11 tests
+# failed again -- 88 passed / 11 failed.
+#
+# 2026-08-26 CORRECTION AND FIX: I had recorded here that those 11 were "not fixable in this
+# checkout" because "the wrapper has NO instruction that CPIs matcher init". THAT WAS WRONG.
+# The wrapper has InitMatcherCtx (tag 83, handle_init_matcher_ctx at src/v16_program.rs:9166),
+# which derives the delegate PDA, marks it a signer in the CPI, and signs with invoke_signed.
+# Its own doc comment calls it "the only way to initialize a matcher context". It is in the
+# DEPLOYED wrapper 19d5d932 too, so the capability has been live on devnet throughout. I had
+# grepped for the matcher's spelling (InitVamm) and treated zero hits as proof of absence.
+#
+# The harness was calling the matcher's process_init DIRECTLY with is_signer=false, which only
+# ever worked against a matcher missing the BUG-001 check. It now goes through InitMatcherCtx,
+# i.e. the real on-chain path. Result: v16_cu = 98 passed / 1 failed, and ten entries were
+# deleted from this file rather than quarantined on a false premise.
+#
+# Remaining 34 (non-matcher), by cause:
 #
 #   19  sol_invoke_signed() not available            [STRUCTURAL - cannot be fixed here]
 #       tests/v16_wrapper.rs uses a native in-process run_ix/TestAccount harness with no
@@ -62,3 +79,19 @@ x0_stake_flush_to_insurance_at_mainnet
 x2_flush_race_liquidation_crank_order_independent
 x2_flush_race_resolved_market_reverts_mode_not_live
 x5_terminal_reclaim_liveness_via_rotate_no_lockout
+
+#    1  BatchTradeCpi 14-leg x 4-tail exceeds the CU ceiling  [REAL FINDING - tracked]
+#       v16_cu is now 98 passed / 1 failed. The other ten former entries here are FIXED:
+#       the harness used to call the matcher's process_init DIRECTLY with is_signer=false,
+#       which only works against a matcher missing the BUG-001 check. It now bootstraps the
+#       context through the wrapper's InitMatcherCtx (tag 83), which CPIs the matcher with
+#       the delegate PDA as signer via invoke_signed -- the real on-chain path, and per the
+#       instruction's own doc comment "the only way to initialize a matcher context".
+#
+#       The remaining failure is NOT matcher version drift: the archived 585f492 bytes fail
+#       it identically (consumed 1,399,676 of 1,399,700, "exceeded CUs"). With the context
+#       now carrying a correct lp_account_id, the matcher does real work on every fill
+#       instead of bailing early, so the batch genuinely executes 56 fills and runs out of
+#       compute. The test asserts "product 56 <= budget 64 must execute", so the declared
+#       fanout budget of 64 is optimistic against the 1.4M CU ceiling.
+v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product

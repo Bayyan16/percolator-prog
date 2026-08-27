@@ -39,17 +39,35 @@ jobs:
       #
       # The ENGINE is deliberately NOT pinned: it compiles into the wrapper, so main
       # is exactly what we are shipping and what these tests must cover.
+      # NOTE on the nft pin: the DEPLOYED nft commit f18da24 existed only locally -- no
+      # branch on dcccrypto/percolator-nft contained it, so GitHub could not serve it and the
+      # checkout failed. It is now preserved as the branch `deployed/nft-f18da24`, which also
+      # means the bytes running on chain finally have retrievable source.
+      #
+      # Sibling refs MUST be full 40-character SHAs. actions/checkout resolves `ref` by
+      # running `git fetch origin <ref>`, and an abbreviated SHA is not a valid fetch refspec,
+      # so a 7-char pin fails the checkout step outright. This CI had never once gone green
+      # because of that -- every run since it was added died on "checkout matcher".
+      # 2026-08-25: matcher redeployed 585f492 -> d4d4f1c (byte-verified), so this pin
+      # moves with it. d4d4f1c INCLUDES the restored lp_pda signer check (33e1185,
+      # BUG-001) -- which is exactly what the 11 previously-quarantined v16_cu failures
+      # were: `init_matcher_context_with_data` calls matcher `process_init` passing the
+      # wrapper's matcher-delegate PDA as `lp_pda` with is_signer=false, and the deployed
+      # matcher now correctly rejects that. Those are a TEST-HARNESS limitation, not a
+      # product regression: no production path creates matcher contexts (verified across
+      # sdk/launch/keeper/indexer), and existing contexts are unaffected because the fill
+      # path already required the signer.
       - name: checkout matcher (pinned to the deployed commit)
         uses: actions/checkout@v4
-        with: { repository: dcccrypto/percolator-match, path: percolator-match, ref: '585f492', token: '${{ secrets.GITHUB_TOKEN }}' }
+        with: { repository: dcccrypto/percolator-match, path: percolator-match, ref: 'd4d4f1c40efb37cbcf44e42b99a46d49c32c4dca', token: '${{ secrets.GITHUB_TOKEN }}' }
       - name: checkout nft (pinned to the deployed commit)
         uses: actions/checkout@v4
-        with: { repository: dcccrypto/percolator-nft, path: percolator-nft, ref: 'f18da24', token: '${{ secrets.GITHUB_TOKEN }}' }
+        with: { repository: dcccrypto/percolator-nft, path: percolator-nft, ref: 'f18da240677c390adb74285d03b2bbdc9e1dfef1', token: '${{ secrets.GITHUB_TOKEN }}' }
       # Stake likewise, and for an extra reason: main carries the 408-byte StakePool
       # layout that is deliberately NOT deployed (25 live pools are 392 bytes).
       - name: checkout stake (pinned to the deployed commit)
         uses: actions/checkout@v4
-        with: { repository: dcccrypto/percolator-stake, path: percolator-stake, ref: '474079f', token: '${{ secrets.GITHUB_TOKEN }}' }
+        with: { repository: dcccrypto/percolator-stake, path: percolator-stake, ref: '474079f968d9f8aeb3ba85e611ef2e1eaf4353e4', token: '${{ secrets.GITHUB_TOKEN }}' }
 
       - uses: dtolnay/rust-toolchain@stable
       - name: install solana toolchain (cargo build-sbf)
