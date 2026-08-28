@@ -11322,3 +11322,154 @@ fn v17_new_error_ordinals_are_appended_at_the_tail() {
     assert_eq!(PercolatorError::StakeProgramNotPinned as u32, 60);
     assert_eq!(PercolatorError::AssetSlotAlreadyConfigured as u32, 61);
 }
+
+/// #436 CHARACTERISATION — what actually drives BatchTradeCpi compute?
+///
+/// The budget is `MATCHER_BATCH_TAIL_FANOUT_BUDGET = MAX_MATCHER_TAIL_ACCOUNTS * 2 = 64`,
+/// enforced as `legs.len() * tail.len() > 64 -> reject` (v16_program.rs:9492). The companion
+/// test proves a 14x4 product of 56 passes that check and then dies at 1_399_676 of 1_399_700
+/// CU. What it does NOT establish is whether the PRODUCT is the right thing to bound.
+///
+/// This sweeps the two axes independently and prints measured CU, so the remediation has a
+/// number instead of an adjective. It is a characterisation, not a pass/fail assertion about
+/// any particular limit — the only thing it asserts is that the cheap corner works, which
+/// keeps it from silently measuring a broken harness.
+#[test]
+fn v16_bpf_batch_trade_cpi_fanout_budget_characterisation() {
+    const PRICE: u64 = 100;
+
+    fn benign_tail(env: &mut V16CuEnv, count: usize) -> Vec<Pubkey> {
+        (0..count)
+            .map(|_| {
+                let key = Pubkey::new_unique();
+                env.svm
+                    .set_account(
+                        key,
+                        Account {
+                            lamports: 1_000_000_000,
+                            data: vec![0u8; 8],
+                            owner: Pubkey::default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        },
+                    )
+                    .unwrap();
+                key
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn metas(
+        taker: Pubkey,
+        market: Pubkey,
+        taker_account: Pubkey,
+        lp_account: Pubkey,
+        matcher_program: Pubkey,
+        ctx: Pubkey,
+        delegate: Pubkey,
+        tail: &[Pubkey],
+    ) -> Vec<AccountMeta> {
+        let mut m = vec![
+            AccountMeta::new(taker, true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(taker_account, false),
+            AccountMeta::new(lp_account, false),
+            AccountMeta::new_readonly(matcher_program, false),
+            AccountMeta::new(ctx, false),
+            AccountMeta::new_readonly(delegate, false),
+        ];
+        m.extend(tail.iter().copied().map(|k| AccountMeta::new_readonly(k, false)));
+        m
+    }
+
+    /// One measurement. Returns Ok(cu) or Err(reason).
+    fn run(legs_n: u16, tail_n: usize) -> Result<u64, String> {
+        let mut env = V16CuEnv::new_with_market_params_and_price_move(legs_n, 1_000, 1_000, 500);
+        for a in 0..legs_n {
+            env.configure_auth_mark_for_asset_as_admin(a, legs_n as u64 + 1, PRICE);
+        }
+        let matcher_program = Pubkey::new_unique();
+        let bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
+        env.svm.add_program(matcher_program, &bytes);
+        let taker = Keypair::new();
+        let lp = Keypair::new();
+        let taker_account = env.create_portfolio(&taker);
+        let lp_account = env.create_portfolio(&lp);
+        env.deposit(&taker, taker_account, 100_000_000);
+        env.deposit(&lp, lp_account, 100_000_000);
+        let (ctx, delegate, _) = env.init_matcher_context(&lp, matcher_program, lp_account);
+        let legs: Vec<percolator_prog::ix::BatchTradeCpiLeg> = (0..legs_n)
+            .map(|asset_index| percolator_prog::ix::BatchTradeCpiLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            })
+            .collect();
+        let tail = benign_tail(&mut env, tail_n);
+        env.svm.expire_blockhash();
+        env.send(
+            ProgInstruction::BatchTradeCpi { legs },
+            metas(
+                taker.pubkey(),
+                env.market,
+                taker_account,
+                lp_account,
+                matcher_program,
+                ctx,
+                delegate,
+                &tail,
+            ),
+            &[&taker],
+        )
+        .map_err(|e| {
+            if e.contains("exceeded CUs meter") {
+                "CU EXHAUSTED".to_string()
+            } else if e.contains("Custom(9)") {
+                "rejected by budget check".to_string()
+            } else {
+                e.chars().take(60).collect()
+            }
+        })
+    }
+
+    println!("\n  legs x tail = product : result");
+    println!("  ----------------------------------------");
+    // Axis A: hold the tail at 1 and grow legs. If CU tracks legs alone, the product is the
+    // wrong metric and a product budget can never be made safe by shrinking it.
+    let mut per_leg: Vec<(u16, u64)> = Vec::new();
+    for legs_n in [2u16, 4, 8, 10, 11, 12, 14] {
+        match run(legs_n, 1) {
+            Ok(cu) => {
+                println!("  {:>4} x    1 = {:>4} : {:>9} CU", legs_n, legs_n, cu);
+                per_leg.push((legs_n, cu));
+            }
+            Err(e) => println!("  {:>4} x    1 = {:>4} : {}", legs_n, legs_n, e),
+        }
+    }
+    // Axis B: hold legs low and grow the tail, to isolate the tail's own cost.
+    for tail_n in [1usize, 4, 8, 16] {
+        match run(4, tail_n) {
+            Ok(cu) => println!("  {:>4} x {:>4} = {:>4} : {:>9} CU", 4, tail_n, 4 * tail_n, cu),
+            Err(e) => println!("  {:>4} x {:>4} = {:>4} : {}", 4, tail_n, 4 * tail_n, e),
+        }
+    }
+    // The corner the companion test proves fatal, for continuity.
+    match run(14, 4) {
+        Ok(cu) => println!("  {:>4} x {:>4} = {:>4} : {:>9} CU", 14, 4, 56, cu),
+        Err(e) => println!("  {:>4} x {:>4} = {:>4} : {}", 14, 4, 56, e),
+    }
+
+    if per_leg.len() >= 2 {
+        let (l0, c0) = per_leg[0];
+        let (l1, c1) = *per_leg.last().unwrap();
+        let per = (c1.saturating_sub(c0)) / ((l1 - l0) as u64).max(1);
+        println!("\n  marginal cost per LEG (tail fixed at 1): ~{per} CU");
+        println!("  budget of 64 as a product admits 64 legs x 1 tail => ~{} CU", per * 64);
+    }
+
+    // Anti-vacuity only: the cheapest corner must work, or every line above is measuring a
+    // broken harness rather than the program.
+    assert!(run(2, 1).is_ok(), "the 2x1 corner must execute");
+}
