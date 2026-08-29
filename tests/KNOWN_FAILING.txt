@@ -95,3 +95,25 @@ x5_terminal_reclaim_liveness_via_rotate_no_lockout
 #       compute. The test asserts "product 56 <= budget 64 must execute", so the declared
 #       fanout budget of 64 is optimistic against the 1.4M CU ceiling.
 v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product
+
+# =========================================================================================
+# 2026-08-29 -- WHICH nft this baseline was measured against, and why that now matters.
+#
+# Every number in the header above (567 / 34, and the 88 / 11 and 98 / 1 for v16_cu) was
+# measured with the nft sibling pinned at f18da24. f18da24 is NOT what is deployed: devnet
+# runs cf56ba5 (= nft main), which reverted "accept wrapper VERSION 17" (ce6b051) and the
+# DhSkE7u allowlist entry (58911ab). So this file is the FIX-PIN baseline.
+#
+# ci.yml now runs the suite against BOTH pins (matrix `nft_pin`), and scripts/ci-test.sh
+# applies different rules to each:
+#
+#   NFT_PIN=fix       failing set must EQUAL this file. Unchanged from before; nothing here
+#                     is relaxed, and no entry was added for the deployed-nft fallout.
+#   NFT_PIN=deployed  failing set must be a strict SUPERSET of this file, with at least one
+#                     extra failure, every extra from a suite that mounts the nft .so.
+#
+# The deployed-pin extras are deliberately NOT listed here. Allowlisting them is what would
+# re-hide the on-chain defect; instead CI asserts the defect is present and visible, and
+# goes red the moment that stops being true (i.e. when the nft is redeployed with the fix).
+# See ci/deployed-refs.env and tests/KNOWN_PARITY_DIVERGENCE.txt.
+# =========================================================================================

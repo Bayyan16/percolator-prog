@@ -178,6 +178,43 @@ pub mod constants {
     /// see percolator/src/v16.rs lp_vault module doc).
     pub const LP_VAULT_MINIMUM_LIQUIDITY: u128 = 1_000;
 
+    /// #440: upper bound on `CreateLpVault`'s `redemption_cooldown_slots`.
+    ///
+    /// ~1 year at ~2.5 slots/sec. DELIBERATELY THE SAME NUMBER as
+    /// `percolator-stake::processor::MAX_COOLDOWN_SLOTS` (processor.rs:96), which
+    /// exists for the identical failure (#121 there): the field is write-once, it
+    /// gates the only instruction that returns principal, and
+    /// `lp_vault::lp_redemption_cooldown_elapsed` compares
+    /// `current_slot >= request_slot.saturating_add(cooldown)`. The saturation is
+    /// correct arithmetic — the defect is that nothing stopped the INPUT reaching a
+    /// value at which correct saturation pins the deadline past any slot the chain
+    /// will ever reach. `CloseLpVault` cannot unwind it either: it requires
+    /// `total_lp_shares_outstanding <= LP_VAULT_MINIMUM_LIQUIDITY` and the only
+    /// thing that burns depositor shares is the redemption that is blocked, so
+    /// depositors AND the admin are stuck for good.
+    ///
+    /// Why this exact number rather than a tighter one: the two programs are
+    /// operated as one system by the same market operators, both cooldowns are set
+    /// by the same admin at creation, and a divergent cap would make "what is a
+    /// legal cooldown here?" a per-program question with no principle behind the
+    /// difference. ~1 year is already far longer than any cooldown a real vault
+    /// would use, so the cap costs no legitimate configuration; its whole job is to
+    /// keep the deadline REACHABLE.
+    ///
+    /// WHERE WE DELIBERATELY DIVERGE FROM THE SIBLING: stake also rejects
+    /// `cooldown_slots == 0`, and this does NOT. That rejection is justified there
+    /// by a reason that does not exist here — stake has an `UpdateConfig` path which
+    /// calls the same validator, so a pool created at 0 could never be raised to a
+    /// non-zero value without a window in which it had no cooldown (processor.rs:527).
+    /// The wrapper has NO update path for this field at all (one writer, :14621),
+    /// so there is no such window, and an immediate-redemption vault is a legitimate
+    /// operator choice rather than a half-configured state. Rejecting 0 here would
+    /// also be a behaviour change that strands nothing and forbids something the
+    /// deployed program has always allowed and that the suite exercises heavily
+    /// (`setup_vault(0)` throughout tests/v16_fork_lp_vault_redeem.rs). The bug in
+    /// #440 is unbounded ABOVE; that is what is bounded.
+    pub const MAX_LP_REDEMPTION_COOLDOWN_SLOTS: u64 = 78_840_000;
+
     /// LP Vault instruction tags (v17 renumbered from 65-71 → 74-80 to avoid
     /// collision with toly's UpdateAssetAuthority(65)/BatchTradeNoCpi(66)/
     /// BatchTradeCpi(67)/SetMatcherConfig(68)/RestartAssetOracle(69)).
@@ -12378,56 +12415,96 @@ pub mod processor {
         if new_pubkey == [0u8; 32] && kind != ASSET_AUTH_ADMIN {
             return Err(PercolatorError::InvalidInstruction.into());
         }
-        // #416/#417: the `admin_signed` bypass must not reach the insurance legs.
-        // `asset_admin` could otherwise take `insurance_authority` (terminal budget
-        // entitlement, evaluated from the CURRENT profile at withdrawal time) or
-        // `insurance_operator` (which satisfies `local_authorized` in
-        // handle_withdraw_insurance_asset, a branch the D-STAKE-1 guard does not
-        // cover) away from a holder that never consented. Same root cause as #414;
-        // #424's custody guard was scoped to ASSET_AUTH_BACKING_BUCKET only.
+        // ── #437/#439: the admin bypass is an allow-list of STATES, not of KINDS. ──
         //
-        // Assigning an UNHELD role (current_value == 0) still uses the admin path —
-        // there is no holder to defend, and bootstrapping must stay possible.
-        let admin_bypass_permitted = !matches!(
-            kind,
-            ASSET_AUTH_INSURANCE | ASSET_AUTH_INSURANCE_OPERATOR
-        ) || current_value == [0u8; 32];
-        if !(admin_signed && admin_bypass_permitted) {
-            expect_live_authority(&current_value, current.key)?;
-        }
-        // An LP vault's custody rests entirely on `backing_bucket_authority ==
-        // registry_pda` (handle_create_lp_vault's FIND-1 binding). Rotating that
-        // away hands every depositor's principal to an arbitrary key via
-        // WithdrawBackingBucket, and the registry PDA can never co-sign to defend
-        // itself — no path CPIs back into this program to sign as it — so the
-        // `admin_signed` branch above would otherwise skip consent entirely.
+        // History of this guard, one leg at a time: #414 found `asset_admin` could take
+        // `insurance_authority`; #416/#417 added `insurance_operator` to the same
+        // `matches!`; #424 bolted a separate custody check onto `backing_bucket_authority`.
+        // Each fix NAMED the kind it was closing, which left the rule "bypass everything
+        // except the names we happened to think of". #437/#439 is the bill for that: the
+        // `matches!` listed two of the five kinds, so ORACLE and BACKING_BUCKET skipped
+        // `expect_live_authority` entirely and `asset_admin` could rotate them away from a
+        // holder that never signed — for ORACLE, straight into ConfigureAuthMark (which
+        // itself switches `oracle_mode`, so no prior auth-mark configuration is needed) and
+        // PushAuthMark, i.e. the asset's whole price surface.
         //
-        // The registry account is consulted ONLY on this branch, and its ABSENCE
-        // rejects: omitting it cannot be used to skip the guard, and `expect_key`
-        // pins the address so no substitute is accepted. Scoped to the vault's own
-        // asset so an unrelated slot that merely happens to carry this value (a
-        // lifecycle activation can plant it verbatim, with no co-signature) is not
-        // welded shut.
+        // So the rule is INVERTED rather than extended. The bypass is now permitted only
+        // for a state in which there IS NO HOLDER TO DEFEND. A sixth authority kind added
+        // later is therefore guarded on the day it is added, instead of being silently
+        // exempt until someone files the next issue.
         //
-        // Rotation becomes possible again once CloseLpVault zeroes the registry,
-        // which is the wind-down path and must stay open: that handler leaves the
-        // LP mint on-chain, so CreateLpVault can never re-run for this market, and
-        // the dead-share floor's backing residue stays in the bucket. Reclaiming
-        // that residue — and reaching CloseSlab, which requires header.vault == 0 —
-        // needs this authority re-pointed at a signable key.
-        if kind == ASSET_AUTH_BACKING_BUCKET {
-            let (registry_pda, _) = state::derive_lp_vault_registry(program_id, market_ai.key);
-            if current_value == registry_pda.to_bytes() {
-                let registry_ai = account(accounts, 3)?;
-                expect_key(registry_ai, &registry_pda)?;
-                let registry_data = registry_ai.try_borrow_data()?;
-                if state::is_initialized(&registry_data) {
-                    let registry = state::read_lp_vault_registry(&registry_data)?;
-                    if registry.domain as usize / 2 == asset_index {
-                        return Err(PercolatorError::LpVaultAuthorityMismatch.into());
+        // Two unheld states exist:
+        //
+        //  1. `current_value == 0` — bootstrapping. Kept from the previous rule. In
+        //     practice every activation path already fills all four sub-authorities
+        //     (`domain_authority_fields_complete`, :6799; `activate_dynamic_asset_slot`,
+        //     :2180) and non-admin kinds cannot be burned back to 0 (the check directly
+        //     above), so this is defence in depth rather than a live path.
+        //
+        //  2. The LP-vault registry PDA holding `backing_bucket_authority` AFTER the vault
+        //     has been closed. `handle_create_lp_vault`'s FIND-1 binding parks this
+        //     authority on `registry_pda`, an address NOTHING can sign for — no path CPIs
+        //     back into this program to sign as it. Under a holder-consent rule that is not
+        //     "a holder that must consent", it is a permanent lock, and #424's own comment
+        //     records why the lock must not be permanent: CloseLpVault leaves the LP mint
+        //     on-chain (so CreateLpVault can never re-run) and leaves the dead-share floor's
+        //     backing residue in the bucket, and reclaiming that residue — plus reaching
+        //     CloseSlab, which needs `header.vault == 0` — requires re-pointing this
+        //     authority at a signable key. Treating an unsignable-PDA holder as unheld is
+        //     what keeps wind-down reachable while the inversion closes ORACLE.
+        //
+        // #424's hard reject is preserved verbatim inside (2) and still fires FIRST: while
+        // the registry is live and names THIS asset, the rotation is refused outright, not
+        // merely consent-checked. Scoped to the vault's own asset, so an unrelated slot that
+        // merely carries this value (a lifecycle activation can plant it verbatim, with no
+        // co-signature) is not welded shut. The registry account is consulted only on this
+        // branch and its ABSENCE rejects — omitting it cannot skip the guard, and
+        // `expect_key` pins the address so no substitute is accepted.
+        //
+        // The whole block is gated on `admin_signed`, which is behaviour-preserving for
+        // every other caller and keeps `derive_lp_vault_registry`'s find_program_address off
+        // the hot path: a non-admin signer took `expect_live_authority` before reaching the
+        // #424 check under the old ordering too (the registry PDA cannot sign, so that call
+        // always returned Unauthorized first), so no error code moves.
+        //
+        // WHAT THIS COSTS. `asset_admin` can no longer re-point a HELD authority without
+        // that holder's signature — including to recover from a holder key that is lost. The
+        // insurance legs have already paid that price since #416/#417; this makes it uniform
+        // across all five kinds. Two escape hatches remain and are unaffected: for assets
+        // 1..N, `marketauth` can RETIRE and re-ACTIVATE the slot, which rewrites all four
+        // sub-authorities (:13061-13065); and delegating to a multisig/PDA that CAN sign
+        // keeps rotation available by construction. Asset 0 has no such hatch, which is
+        // deliberate — the same re-activation branch is barred from asset 0 to protect the
+        // creator-fee claim (:13029). An operator who wants revocable delegation should
+        // therefore hand out `insurance_operator`-style roles from a signable custodian
+        // rather than expect the admin to claw them back.
+        let admin_bypass_permitted = admin_signed
+            && (current_value == [0u8; 32] || {
+                if kind == ASSET_AUTH_BACKING_BUCKET {
+                    let (registry_pda, _) =
+                        state::derive_lp_vault_registry(program_id, market_ai.key);
+                    if current_value == registry_pda.to_bytes() {
+                        let registry_ai = account(accounts, 3)?;
+                        expect_key(registry_ai, &registry_pda)?;
+                        let registry_data = registry_ai.try_borrow_data()?;
+                        if state::is_initialized(&registry_data) {
+                            let registry = state::read_lp_vault_registry(&registry_data)?;
+                            if registry.domain as usize / 2 == asset_index {
+                                return Err(PercolatorError::LpVaultAuthorityMismatch.into());
+                            }
+                        }
+                        // Live-but-other-asset, or closed: no signer exists behind this
+                        // value, so there is no consent to obtain.
+                        true
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
-            }
+            });
+        if !admin_bypass_permitted {
+            expect_live_authority(&current_value, current.key)?;
         }
         match kind {
             ASSET_AUTH_ADMIN => profile.asset_admin = new_pubkey,
@@ -14512,6 +14589,16 @@ pub mod processor {
             return Err(PercolatorError::InvalidInstruction.into());
         }
         if fee_share_bps > 10_000 || oi_reservation_threshold_bps > 10_000 {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        // #440: `redemption_cooldown_slots` sat here as a raw u64 beside two bounded
+        // parameters. It is written exactly once (below, the ONLY write in the program)
+        // and read only at ExecuteRedemption, so an absurd value can never be lowered and
+        // permanently strands every depositor's principal — CloseLpVault cannot unwind it
+        // because only the blocked redemption burns shares. Bound it at creation, which is
+        // the only place a bound can exist. See MAX_LP_REDEMPTION_COOLDOWN_SLOTS for why
+        // this matches percolator-stake's cap exactly and why 0 stays legal here.
+        if redemption_cooldown_slots > crate::constants::MAX_LP_REDEMPTION_COOLDOWN_SLOTS {
             return Err(PercolatorError::InvalidInstruction.into());
         }
 

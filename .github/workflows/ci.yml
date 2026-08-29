@@ -14,14 +14,67 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # =========================================================================================
+  # CROSS-PROGRAM PARITY -- minutes, no toolchain, and it is the job that states the finding.
+  #
+  # The five-program crosscut suite below can only ever tell you about the mix of programs it
+  # was handed. It cannot tell you that the mix is wrong. #441 (wrapper pins StakePool v3,
+  # stake main emits v4) and the P5 nft regression (deployed nft requires wrapper header
+  # VERSION 16, deployed wrapper stamps 17) both have the same shape: every repo internally
+  # consistent, every suite green, nothing comparing the SHIPPED PAIR. This job compares it.
+  # =========================================================================================
+  parity:
+    name: cross-program parity (constants, not bytes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: checkout percolator-prog
+        uses: actions/checkout@v4
+        with: { path: percolator-prog, fetch-depth: 0 }
+      # fetch-depth: 0 everywhere -- the check reads constants with `git show <ref>:<path>` at
+      # DEPLOYED refs that are not the tip, so a shallow clone would make it unable to resolve
+      # them. It hard-fails on an unresolvable ref rather than skipping the comparison.
+      - name: checkout stake (full history)
+        uses: actions/checkout@v4
+        with: { repository: dcccrypto/percolator-stake, path: percolator-stake, fetch-depth: 0, token: '${{ secrets.GITHUB_TOKEN }}' }
+      - name: checkout nft (full history)
+        uses: actions/checkout@v4
+        with: { repository: dcccrypto/percolator-nft, path: percolator-nft, fetch-depth: 0, token: '${{ secrets.GITHUB_TOKEN }}' }
+      - name: parity check
+        working-directory: percolator-prog
+        run: ./scripts/parity-check.sh
+
   test:
-    name: build + test (with sibling programs)
+    name: build + test
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # ONE NFT PIN, as of 2026-08-29.
+      #
+      # This was a two-axis matrix (`deployed` vs `fix`) precisely because they DISAGREED: the
+      # deployed nft had reverted two fixes that lived only on an unmerged branch, and the
+      # `deployed` leg existed to assert that defect was still visible rather than allowlist it
+      # away. That leg was designed to go RED the moment the fix reached the chain.
+      #
+      # It has. nft main now carries both fixes and is what devnet runs, so the two pins name
+      # the same commit and the matrix would run the identical build twice. Collapsing it is
+      # the last step of that fix, exactly as KNOWN_PARITY_DIVERGENCE.txt describes: "Deleting
+      # the row is the last step of the fix, and after that the guard is a regression test."
+      # The guard survives in scripts/parity-check.sh, which now compares the SHIPPED pair.
+      # ---------------------------------------------------------------------------------
     steps:
       - name: checkout percolator-prog
         uses: actions/checkout@v4
         with: { path: percolator-prog }
+
+      # Sibling pins live in exactly ONE file, ci/deployed-refs.env, and both this workflow
+      # and scripts/parity-check.sh read them from there. They used to be hand-copied into
+      # each checkout step, which is how the nft pin sat at f18da24 for a month after devnet
+      # moved to cf56ba5. parity-check.sh fails the build if a SHA reappears inline here.
+      - name: load canonical deployed refs
+        id: refs
+        run: grep -E '^[A-Z_]+=' percolator-prog/ci/deployed-refs.env >> "$GITHUB_OUTPUT"
 
       # The wrapper compiles the engine through `path = "../percolator"`, and mounts
       # the matcher / nft / stake .so for its cross-program suites. All four must sit
@@ -59,15 +112,23 @@ jobs:
       # path already required the signer.
       - name: checkout matcher (pinned to the deployed commit)
         uses: actions/checkout@v4
-        with: { repository: dcccrypto/percolator-match, path: percolator-match, ref: 'd4d4f1c40efb37cbcf44e42b99a46d49c32c4dca', token: '${{ secrets.GITHUB_TOKEN }}' }
+        with: { repository: dcccrypto/percolator-match, path: percolator-match, ref: '${{ steps.refs.outputs.MATCHER_DEPLOYED }}', token: '${{ secrets.GITHUB_TOKEN }}' }
+      # The nft pin is the matrix axis. `deployed` = cf56ba5 = what devnet runs = nft main.
+      # `fix` = f18da24, preserved on the remote as branch `deployed/nft-f18da24`; it was the
+      # PREVIOUSLY deployed nft and carries ce6b051 (accept wrapper VERSION 17) and 58911ab
+      # (allowlist the DhSkE7u wrapper), neither of which was ever merged to nft main.
       - name: checkout nft (pinned to the deployed commit)
         uses: actions/checkout@v4
-        with: { repository: dcccrypto/percolator-nft, path: percolator-nft, ref: 'f18da240677c390adb74285d03b2bbdc9e1dfef1', token: '${{ secrets.GITHUB_TOKEN }}' }
+        with:
+          repository: dcccrypto/percolator-nft
+          path: percolator-nft
+          ref: ${{ steps.refs.outputs.NFT_DEPLOYED }}
+          token: '${{ secrets.GITHUB_TOKEN }}'
       # Stake likewise, and for an extra reason: main carries the 408-byte StakePool
       # layout that is deliberately NOT deployed (25 live pools are 392 bytes).
       - name: checkout stake (pinned to the deployed commit)
         uses: actions/checkout@v4
-        with: { repository: dcccrypto/percolator-stake, path: percolator-stake, ref: '474079f968d9f8aeb3ba85e611ef2e1eaf4353e4', token: '${{ secrets.GITHUB_TOKEN }}' }
+        with: { repository: dcccrypto/percolator-stake, path: percolator-stake, ref: '${{ steps.refs.outputs.STAKE_DEPLOYED }}', token: '${{ secrets.GITHUB_TOKEN }}' }
 
       - uses: dtolnay/rust-toolchain@stable
       - name: install solana toolchain (cargo build-sbf)
@@ -79,4 +140,6 @@ jobs:
 
       - name: run suite and diff against the allowlist
         working-directory: percolator-prog
+        env:
+          NFT_PIN: deployed
         run: ./scripts/ci-test.sh
