@@ -1,0 +1,73 @@
+# Cross-program parity rows that are KNOWN to diverge, with the reason. Read by
+# scripts/parity-check.sh. Format: `<PAIR> <ROW>`, one per line.
+#
+# THE RULE CUTS BOTH WAYS. A row that diverges and is not listed here is a regression and
+# turns CI red. A row that is listed here and starts AGREEING also turns CI red, so the
+# finding cannot silently rot into permanent green once someone fixes it. Deleting the row
+# is the last step of the fix, and after that the guard is a regression test.
+#
+# DO NOT add a row here to make CI green. A row belongs here only when the divergence is a
+# deliberate, recorded, NON-SHIPPING state and the finding is written down.
+#
+# =========================================================================================
+# 1. DEPLOYED nft -- CONFIRMED LIVE DEFECT, not a landmine. The NFT feature is inert on
+#    devnet right now.
+#
+#    percolator-nft cf56ba5 (= nft origin/main, deployed 2026-08-27 by P5):
+#        slab_types_v16.rs:72   pub const VERSION: u16 = 16;
+#        cpi_v16.rs:89-90       PERCOLATOR_DEVNET = FxfD37s1AZTeWfFQps9Zpebi2dNQ9QSSDtfMKdbsfKrD
+#    percolator-prog a1a8168d (deployed wrapper, program id DhSkE7uTb8HBUYYWF1xkxMYBGtLYJEoDq1tfBD7SnHcj):
+#        src/v16_program.rs:51  pub const VERSION: u16 = 17;
+#
+#    cpi_v16::verify_portfolio_program is a fail-closed allowlist on portfolio.owner and runs
+#    FIRST in every handler, so it rejects with NftError::InvalidPortfolioOwner = Custom(21)
+#    before the version check is even reached; slab_types_v16::decode_portfolio then compares
+#    VERSION for EXACT equality and returns BadVersion. Between them, every nft entry point
+#    that touches a portfolio is dead against the live wrapper: MintPositionNft,
+#    BurnPositionNft, SettleFunding, GetPositionValue and the Token-2022 transfer hook.
+#
+#    HOW IT SHIPPED: both fixes exist -- ce6b051 "accept wrapper VERSION 17" and 58911ab
+#    "point wrapper allowlist at the fresh devnet wrapper ID" -- but only on the branch
+#    feat/accept-wrapper-version-17 (tip f18da24, preserved remotely as deployed/nft-f18da24).
+#    f18da24 WAS the deployed nft; P5 upgraded f18da24 -> cf56ba5 and reverted both on chain.
+#    f18da24 is not an ancestor of cf56ba5 (merge-base 0534f2b), so this was a genuine
+#    regression, not a fast-forward.
+#
+#    CONSEQUENCE: no funds are at risk today, because MintPositionNft fails at the same gate
+#    and no position can be escrowed in the first place. Had a position been escrowed under
+#    the previous build, BurnPositionNft and the transfer hook would also be blocked, and
+#    EmergencyBurn's #110B fallback admits BadVersion but NOT InvalidPortfolioOwner (the
+#    allowlist check precedes the decode), so the recovery path would be blocked too.
+#
+#    REMOVE BOTH ROWS when the nft is redeployed with the fixes and ci/deployed-refs.env is
+#    updated. The nft_pin matrix in ci.yml collapses back to a single pin at the same time.
+DEPLOYED nft.header_version
+DEPLOYED nft.wrapper_allowlist
+
+# =========================================================================================
+# 2. CANDIDATE nft -- the same two rows, for the same reason. nft origin/main IS cf56ba5, so
+#    merging nft main changes nothing: the fixes are still only on the unmerged branch. These
+#    rows stay until f18da24's ce6b051 and 58911ab land on nft main.
+CANDIDATE nft.header_version
+CANDIDATE nft.wrapper_allowlist
+
+# =========================================================================================
+# 3. CANDIDATE stake -- percolator-prog#441. A LANDMINE, not a live fault.
+#
+#    percolator-stake 474079f (deployed):  StakePool::CURRENT_VERSION = 3, STAKE_POOL_SIZE = 392
+#    percolator-stake origin/main d0c6ecb: CURRENT_VERSION = 4, STAKE_POOL_SIZE = 408
+#    percolator-prog  a1a8168d/HEAD:       STAKE_POOL_VERSION = 3, STAKE_POOL_LEN = 392
+#
+#    The DEPLOYED pair agrees -- devnet is fine, which is why these are CANDIDATE rows only
+#    and the DEPLOYED equivalents are deliberately absent. load_bound_stake_pool checks the
+#    version byte for EXACT equality and the account length for exact size, so a one-sided
+#    stake deploy would make the wrapper reject every new v4 pool (InvalidInstruction) and
+#    the v4 stake program reject every existing v3 pool (Custom(16)). It fails closed, no
+#    funds are lost, but tag 87 (WithdrawInsuranceReserveToStake) stops paying the staker fee
+#    leg to every pool. 25 live pools are 392 bytes.
+#
+#    The standing ledger position is "exclude stake from the next deploy batch". These rows
+#    encode that: stake main MUST NOT ship without a coordinated wrapper bump to v4/408, and
+#    when that bump happens both rows agree and CI goes red until they are deleted here.
+CANDIDATE stake.pool_version
+CANDIDATE stake.pool_len
