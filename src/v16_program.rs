@@ -577,6 +577,20 @@ pub mod error {
         /// broke.
         /// SDK agent: add `CreatorFeeOverClaim = 62` to the client error map.
         CreatorFeeOverClaim, // Custom(62)
+        /// CreateLpVault targeted a domain whose backing bucket is ALREADY funded at an
+        /// expiry that is not `LP_VAULT_BACKING_EXPIRY_SLOT`.
+        ///
+        /// Range was checked and reachability was not — the same omission as #440. The vault
+        /// would be created, `backing_bucket_authority` taken by the registry PDA, and then:
+        /// DepositToLpVault refuses for the whole term because the bucket's expiry does not
+        /// match the sentinel, and the provider who funded that bucket can no longer withdraw
+        /// because the authority is gone. The only exit is CloseLpVault, which permanently
+        /// forfeits the market's ability to ever have an LP vault.
+        ///
+        /// APPENDED at the end on purpose: adding a variant anywhere else shifts every
+        /// ordinal after it, silently re-mapping errors for every deployed client.
+        /// SDK agent: add `LpVaultBackingBucketNotEmpty = 63` to the client error map.
+        LpVaultBackingBucketNotEmpty, // Custom(63)
     }
 
     impl From<PercolatorError> for ProgramError {
@@ -14613,6 +14627,28 @@ pub mod processor {
         }
         if (domain as usize) >= configured_slots.saturating_mul(2) {
             return Err(PercolatorError::InvalidInstruction.into());
+        }
+        // REACHABILITY, not just range. The check above bounds `domain`; it says nothing about
+        // whether the vault created there could ever function. If that domain's backing bucket
+        // is already funded at a FOREIGN expiry, the vault is born dead: the FIND-1 binding
+        // below hands `backing_bucket_authority` to the registry PDA, DepositToLpVault then
+        // refuses for the whole term because the bucket's expiry is not
+        // LP_VAULT_BACKING_EXPIRY_SLOT, and the provider who funded the bucket can no longer
+        // withdraw because the authority they held is gone. The only exit is CloseLpVault,
+        // which permanently forfeits this market's ability to ever have an LP vault.
+        //
+        // Checked BEFORE the authority is taken, so a refusal leaves the bucket's owner intact.
+        {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (_cfg_r, group) = state::market_view_mut(&mut market_data)?;
+            let (_, bucket) = backing_domain_parts_view(&group, domain as usize)?;
+            let already_funded = bucket.status != percolator::BackingBucketStatusV16::Empty
+                || bucket.fresh_unliened_backing_num > 0;
+            if already_funded
+                && bucket.expiry_slot != crate::constants::LP_VAULT_BACKING_EXPIRY_SLOT
+            {
+                return Err(PercolatorError::LpVaultBackingBucketNotEmpty.into());
+            }
         }
 
         // Derive + bind the two PDAs.
