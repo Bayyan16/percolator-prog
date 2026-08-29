@@ -12301,9 +12301,18 @@ pub mod processor {
             // portfolio owner). If the crank also called
             //   deregister_materialized_portfolio_if_empty + close_portfolio_account_to_market_slab,
             // any third party could force-close an owner's empty (but previously active) portfolio
-            // without consent. close_portfolio_account_to_market_slab routes the rent lamports to
-            // market_ai — not to portfolio.owner — forcing the owner to re-pay rent to re-open
-            // their account (griefing attack).
+            // without consent, and the closer would receive that owner's rent-exempt lamports,
+            // forcing the owner to re-pay rent to re-open their account (griefing attack).
+            //
+            // STALE SENTENCE CORRECTED 2026-08-29: this comment used to say the rent goes to
+            // `market_ai`, which was true when it was written and stopped being true at #398
+            // ("route portfolio rent to closer, not market slab"). The griefing ARGUMENT is
+            // unaffected and still the reason this handler does not close accounts — it is
+            // about a PERMISSIONLESS caller taking the rent, and after #398 the permissionless
+            // caller would take it directly rather than parking it in the market. The
+            // destination being `closer` is deliberate and correct for the two paths that DO
+            // close: the owner recovers their own deposit on a voluntary close, and marketauth
+            // receives it on terminal cleanup (#398 records both as intended destinations).
             //
             // Additionally, partial deregistration without account-close would strand the portfolio
             // in a "registered-but-deregistered" limbo that blocks the owner's subsequent
