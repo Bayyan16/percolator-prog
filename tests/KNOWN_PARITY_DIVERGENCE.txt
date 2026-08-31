@@ -48,25 +48,24 @@
 #    rows stay until f18da24's ce6b051 and 58911ab land on nft main.
 
 # =========================================================================================
-# 3. CANDIDATE stake -- percolator-prog#441. A LANDMINE, not a live fault.
+# 3. RESOLVED 2026-08-31 -- percolator-prog#441 is FIXED; both rows deleted.
 #
-#    percolator-stake 474079f (deployed):  StakePool::CURRENT_VERSION = 3, STAKE_POOL_SIZE = 392
-#    percolator-stake origin/main d0c6ecb: CURRENT_VERSION = 4, STAKE_POOL_SIZE = 408
-#    percolator-prog  a1a8168d/HEAD:       STAKE_POOL_VERSION = 3, STAKE_POOL_LEN = 392
+#    percolator-prog now pins STAKE_POOL_VERSION = 4 / STAKE_POOL_LEN = 408, matching
+#    percolator-stake origin/main d0c6ecb. The two CANDIDATE rows that stood here
+#    (stake.pool_version, stake.pool_len) are gone because this file's own rule says a
+#    row that starts AGREEING must be deleted, not left to rot into permanent green.
 #
-#    The DEPLOYED pair agrees -- devnet is fine, which is why these are CANDIDATE rows only
-#    and the DEPLOYED equivalents are deliberately absent. load_bound_stake_pool checks the
-#    version byte for EXACT equality and the account length for exact size, so a one-sided
-#    stake deploy would make the wrapper reject every new v4 pool (InvalidInstruction) and
-#    the v4 stake program reject every existing v3 pool (Custom(16)). It fails closed, no
-#    funds are lost, but tag 87 (WithdrawInsuranceReserveToStake) stops paying the staker fee
-#    leg to every pool. 25 live pools are 392 bytes.
+#    The bump was safe ONLY because every offset the wrapper reads was verified
+#    unchanged: percolator-stake state.rs:209-223 const-asserts is_initialized@0,
+#    slab@8, vault@136, percolator_program@224, pool_mode@280, _reserved@320
+#    (discriminator@320, version@328). v4's new fields sit at 288/384/392/400. The
+#    SIZE moved; the OFFSETS did not, and the offsets are what the wrapper depends on.
 #
-#    The standing ledger position is "exclude stake from the next deploy batch". These rows
-#    encode that: stake main MUST NOT ship without a coordinated wrapper bump to v4/408, and
-#    when that bump happens both rows agree and CI goes red until they are deleted here.
-CANDIDATE stake.pool_version
-CANDIDATE stake.pool_len
+#    v4 is pinned EXCLUSIVELY, so this IS a flag day: 392-byte v3 pools are now
+#    rejected on length. That was an accepted, deliberate break -- the live devnet
+#    pools were explicitly declared disposable, and v3 is the layout carrying the
+#    #242/PERC-313 _reserved collision. The two programs MUST ship together; shipping
+#    either alone stops tag 87 paying the staker fee leg.
 
 # 2026-08-29 -- the four nft rows above were REMOVED, which is the intended end of their life.
 # This file's own rule says a listed row that starts AGREEING turns CI red, so that a finding

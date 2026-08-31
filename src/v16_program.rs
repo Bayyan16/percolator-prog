@@ -348,18 +348,36 @@ pub mod constants {
     /// SHARED SEED CONTRACT: SPL authority over the pool's vault token account.
     pub const STAKE_VAULT_AUTHORITY_SEED: &[u8] = b"vault_auth";
 
-    /// `percolator-stake::state::STAKE_POOL_SIZE` (v3 — the
-    /// `assert!(STAKE_POOL_SIZE == 392)` in that file's const-assert block,
-    /// `state.rs:204` at percolator-stake@474079f). NOTE: `tests/v16_five_program_crosscut.rs:1662` still crafts the
+    /// `percolator-stake::state::STAKE_POOL_SIZE` (v4 — the
+    /// `assert!(STAKE_POOL_SIZE == 408)` in that file's const-assert block,
+    /// `state.rs:237` at percolator-stake@d0c6ecb, which is `origin/main`).
+    /// NOTE: `tests/v16_five_program_crosscut.rs:1662` still crafts the
     /// v2 384-byte shape; that harness is stale, not this constant.
-    pub const STAKE_POOL_LEN: usize = 392;
+    pub const STAKE_POOL_LEN: usize = 408;
     pub const STAKE_POOL_DISCRIMINATOR: [u8; 8] = *b"SPOOL_V1";
-    /// `StakePool::CURRENT_VERSION` (`pub const CURRENT_VERSION: u8 = 3`,
-    /// `state.rs:506` at percolator-stake@474079f). Checked EXACTLY, never
-    /// ignored: the `_reserved` sub-layout has been recarved at every version
-    /// bump (352 -> 384 -> 392), so a future v4 must fail loudly here rather
-    /// than misread `vault` out of a moved field.
-    pub const STAKE_POOL_VERSION: u8 = 3;
+    /// `StakePool::CURRENT_VERSION` (`pub const CURRENT_VERSION: u8 = 4`,
+    /// `state.rs:584` at percolator-stake@d0c6ecb = `origin/main`). Checked
+    /// EXACTLY, never ignored: the `_reserved` sub-layout has been recarved at
+    /// every version bump (352 -> 384 -> 392 -> 408), so a future v5 must fail
+    /// loudly here rather than misread `vault` out of a moved field.
+    ///
+    /// v3 -> v4 (#441) was safe to accept ONLY because it was VERIFIED that every
+    /// offset this file reads is unchanged. percolator-stake `state.rs:209-223`
+    /// const-asserts `is_initialized@0`, `slab@8`, `vault@136`,
+    /// `percolator_program@224`, `pool_mode@280` and `_reserved@320`
+    /// (discriminator@320, version@328) — exactly the six constants below. v4's
+    /// new fields sit at 288/384/392/400 and disturb none of them. Re-running
+    /// that check is the precondition for EVERY future bump. Do not assume it:
+    /// the offsets, not the size, are what this file actually depends on.
+    ///
+    /// v4 is pinned EXCLUSIVELY rather than accepted alongside v3, deliberately.
+    /// v3 is the layout whose `_reserved` collision (#242 / PERC-313) silently
+    /// disabled the redemption floor and bypassed the cooldown timelock, so
+    /// keeping it spendable would keep that defect reachable. The cost is a flag
+    /// day: `STAKE_POOL_LEN` is checked with `<`, so a 392-byte v3 pool is now
+    /// rejected on length before the version byte is ever read, and every live
+    /// pool must be recreated. That is an accepted, deliberate break.
+    pub const STAKE_POOL_VERSION: u8 = 4;
     /// Byte offsets into `StakePool` (percolator-stake `state.rs:19-114`).
     pub const STAKE_POOL_OFF_IS_INITIALIZED: usize = 0;
     /// The wrapper market this pool is bound to.

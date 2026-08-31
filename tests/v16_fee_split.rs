@@ -389,8 +389,8 @@ fn validate_fee_split_rejects_floor_violations_with_exact_code() {
 // the transferred atoms and the market vault's must fall by the same, with
 // `header.insurance` tracking it. Conservation is asserted explicitly.
 //
-// The stake pool here is hand-crafted at the v3 layout (392 B, version 3 --
-// `percolator-stake/src/state.rs:688`/`:464`). It is NOT decoration: the real
+// The stake pool here is hand-crafted at the v4 layout (408 B, version 4 --
+// `percolator-stake/src/state.rs:237`/`:584` at `origin/main` d0c6ecb). It is NOT decoration: the real
 // `percolator_stake.so` is loaded and its BindInsuranceAuthority (tag 19) is
 // what establishes `insurance_authority`, so a wrong offset or version in the
 // craft fails the bind and the test cannot reach tag 87 at all. That makes the
@@ -425,9 +425,15 @@ fn canonical_vault_ata(vault_authority: &Pubkey, mint: &Pubkey) -> Pubkey {
     .0
 }
 
-/// v3 StakePool (392 B). Offsets mirror `percolator-stake/tests/struct_layout.rs`.
+/// v4 StakePool (408 B). Offsets mirror `percolator-stake/tests/struct_layout.rs`.
+///
+/// v4, not v3 (#441): stake `origin/main` (d0c6ecb) emits 408 B / version 4 after
+/// #280 promoted the #242 cooldown timelock out of `_reserved`. Every offset this
+/// craft writes is const-asserted UNCHANGED at `state.rs:209-223`; only the size
+/// and the version byte move. The wrapper now pins v4 exclusively, so a v3 craft
+/// would be rejected on length (`data.len() < 408`) before the version is read.
 #[allow(clippy::too_many_arguments)]
-fn craft_stake_pool_v3(
+fn craft_stake_pool_v4(
     market: &Pubkey,
     admin: &Pubkey,
     collateral_mint: &Pubkey,
@@ -438,7 +444,7 @@ fn craft_stake_pool_v3(
     percolator_program: &Pubkey,
     vault_authority_bump: u8,
 ) -> Vec<u8> {
-    let mut d = vec![0u8; 392];
+    let mut d = vec![0u8; 408];
     d[0] = 1; // is_initialized
     d[1] = 255; // pool bump (informational)
     d[2] = vault_authority_bump;
@@ -452,7 +458,7 @@ fn craft_stake_pool_v3(
     d[224..256].copy_from_slice(percolator_program.as_ref()); // CPI target
     // d[280] pool_mode = 0 (insurance LP) — already zero.
     d[320..328].copy_from_slice(b"SPOOL_V1"); // discriminator
-    d[328] = 3; // CURRENT_VERSION
+    d[328] = 4; // CURRENT_VERSION
     d
 }
 
@@ -692,7 +698,7 @@ impl FeeEnv {
             )
             .unwrap();
         let lp_mint = Pubkey::new_unique();
-        let pool_bytes = craft_stake_pool_v3(
+        let pool_bytes = craft_stake_pool_v4(
             &self.market,
             &self.admin.pubkey(),
             &self.mint,
@@ -1575,9 +1581,15 @@ fn tag87_blocks_the_creator_forged_stake_pool_exploit() {
         .unwrap();
 
     // (3) A byte-perfect pool at the derived address, owned by the attacker's
-    // program: right discriminator, version 3, initialized, slab == market,
+    // program: right discriminator, version 4, initialized, slab == market,
     // percolator_program == this wrapper, pool_mode == 0.
-    let pool_bytes = craft_stake_pool_v3(
+    //
+    // It MUST track the pinned version (#441 moved it to v4). If this craft were
+    // left at v3 the forged pool would be refused on its length/version before the
+    // program pin was ever consulted, and this test would go green for the wrong
+    // reason — proving only that the wrapper rejects stale layouts, not that it
+    // rejects an attacker-owned program. Byte-perfect is the whole point.
+    let pool_bytes = craft_stake_pool_v4(
         &env.market,
         &env.admin.pubkey(),
         &env.mint,

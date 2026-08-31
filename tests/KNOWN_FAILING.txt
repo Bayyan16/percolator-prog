@@ -1,3 +1,15 @@
+# 2026-08-31 (#441) — 13 entries REMOVED because they now pass.
+#
+# Every tag87_* and x* entry below was quarantined as broken wiring. They were not
+# broken: they were reporting a real StakePool version skew. The wrapper pinned v3
+# while the crafts and the loaded percolator_stake.so disagreed, so the bind failed
+# with Custom(16) before any behaviour under test ran. Moving the wrapper to v4 and
+# rebuilding stake at origin/main d0c6ecb made all 13 pass unchanged — no test was
+# edited to fit, only the version constants they were always asserting about.
+#
+# The lesson: a quarantined test can be a FINDING that was filed as flakiness. When
+# a whole cluster fails at the same setup step, suspect the fixture contract, not
+# the tests.
 # Tests that CANNOT pass in this checkout, with the reason. CI is GREEN only when the
 # failing set matches this file EXACTLY -- a new failure is a regression, and an entry
 # that starts passing must be deleted here, so the list cannot silently rot.
@@ -47,15 +59,6 @@
 # Reducing this list is tracked work, not a licence to ignore failures.
 e2e::e2e_cross_portfolio_substitution_rejects
 e2e::e2e_direct_hook_invocation_rejects
-tag87_blocks_the_creator_forged_stake_pool_exploit
-tag87_end_to_end_from_a_real_trade_fee_with_no_seeding
-tag87_moves_real_tokens_into_the_stake_vault_and_conserves_value
-tag87_owner_pin_fires_before_any_pool_byte_is_read
-tag87_partial_fill_marks_only_what_was_transferred
-tag87_pool_content_failures_have_distinct_codes
-tag87_rejects_a_market_with_no_bound_stake_pool
-tag87_succeeds_with_asset_admin_live_proving_the_burn_gate_is_gone
-tag87_with_nothing_accrued_returns_custom_53
 v16_wrapper_close_portfolio_rejects_non_empty_and_closes_empty
 v16_wrapper_close_slab_requires_admin_resolved_empty_market
 v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_secondary_mint
@@ -75,10 +78,6 @@ v16_wrapper_underfunded_flat_sync_sweeps_remaining_capital_once
 v16_wrapper_update_asset_authority_rejects_after_resolve_to_freeze_terminal_claims
 v16_wrapper_withdraw_insurance_limited_is_live_only_and_terminal_uses_authority
 v16_wrapper_withdraw_insurance_requires_operator_and_healthy_market
-x0_stake_flush_to_insurance_at_mainnet
-x2_flush_race_liquidation_crank_order_independent
-x2_flush_race_resolved_market_reverts_mode_not_live
-x5_terminal_reclaim_liveness_via_rotate_no_lockout
 
 #    1  BatchTradeCpi 14-leg x 4-tail exceeds the CU ceiling  [REAL FINDING - tracked]
 #       v16_cu is now 98 passed / 1 failed. The other ten former entries here are FIXED:

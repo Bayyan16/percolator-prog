@@ -1698,12 +1698,19 @@ fn x6_ledger_collateral_conservation_across_lifecycle() {
 // is HAND-CRAFTED (384 bytes) and the stake tags are HAND-ENCODED. The proven
 // wiring is lifted from percolator-stake/tests/v16_stake_insurance_e2e.rs (which
 // uses the real crate under litesvm 0.6). PoolV16 layout: state.rs:19-114,
-// STAKE_POOL_SIZE=384 (:515); discriminator "SPOOL_V1" @320..328, version 2 @328.
+// STAKE_POOL_SIZE=408 (`state.rs:237`); discriminator "SPOOL_V1" @320..328,
+// version 4 @328, at percolator-stake `origin/main` d0c6ecb.
+//
+// This craft was stranded at the v2 384-byte shape long after stake moved to v3,
+// which is why the four x* tests below sat in KNOWN_FAILING: the real stake `.so`
+// refused the bind with Custom(16) before any cross-program behaviour was
+// exercised. They were quarantined as flaky wiring, but they were reporting a
+// genuine version skew the whole time. #441 is the same skew one version later.
 // ════════════════════════════════════════════════════════════════════════════
 
-const STAKE_POOL_SIZE: usize = 384;
+const STAKE_POOL_SIZE: usize = 408;
 const STAKE_POOL_DISCRIMINATOR: &[u8; 8] = b"SPOOL_V1";
-const STAKE_POOL_VERSION: u8 = 2;
+const STAKE_POOL_VERSION: u8 = 4;
 
 /// Hand-craft a v16 StakePool in insurance-LP mode (pool_mode=0), bound to
 /// `market` + `percolator_program`, with `vault` funded for flush. Mirrors the
