@@ -10683,10 +10683,20 @@ fn v16_fix_w2_drain_only_risk_increase_cpi_trade_rejects_before_matcher() {
 // 56 -- and only the multiplicative cap can tell them apart.
 #[test]
 fn v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product() {
-    const LEGS: usize = 14; // matches this market's max_portfolio_assets below.
+    // REWRITTEN 2026-08-29 for the #436 fix. This test used to assert that a 14-leg x 4-tail
+    // batch (product 56 <= budget 64) MUST EXECUTE. It never could: measurement showed a leg
+    // costs ~120,000 CU, so 12+ legs exhaust the 1.4M ceiling regardless of tail size, and the
+    // test sat quarantined in KNOWN_FAILING for exactly that reason.
+    //
+    // MATCHER_BATCH_MAX_LEGS is now 11 (the measured ceiling) rather than 16, so 12..=16 are
+    // rejected up front instead of passing the declared checks and dying on compute. The test
+    // now pins BOTH bounds and the boundary between them.
+    const LEGS: usize = 12; // market capacity: one past the new max, so both sides are reachable.
     const PRICE: u64 = 100;
-    const REJECT_TAIL: usize = 5; // 14*5=70 > 64 budget; 5<=32 legal alone, 14<=16 legal alone.
-    const ALLOW_TAIL: usize = 4; // 14*4=56 <= 64 budget.
+    const OVER_LEGS: usize = 12; // one past MATCHER_BATCH_MAX_LEGS=11 -> leg bound fires.
+    const MAX_LEGS: usize = 11; // the bound itself must still work.
+    const REJECT_TAIL: usize = 6; // 11*6=66 > 64 -> the PRODUCT bound fires (6<=32 legal alone).
+    const ALLOW_TAIL: usize = 5; // 11*5=55 <= 64 -> product is legal; only compute limits it.
 
     fn add_benign_tail_accounts(env: &mut V16CuEnv, count: usize) -> Vec<Pubkey> {
         (0..count)
@@ -10748,75 +10758,96 @@ fn v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product() {
     env.deposit(&taker, taker_account, 100_000_000);
     env.deposit(&lp, lp_account, 100_000_000);
     let (ctx, delegate, _) = env.init_matcher_context(&lp, matcher_program, lp_account);
-    let legs: Vec<percolator_prog::ix::BatchTradeCpiLeg> = (0..LEGS as u16)
-        .map(|asset_index| percolator_prog::ix::BatchTradeCpiLeg {
-            asset_index,
-            size_q: POS_SCALE as i128,
-            fee_bps: 100,
-            limit_price: 0,
-        })
-        .collect();
+    let mk_legs = |n: usize| -> Vec<percolator_prog::ix::BatchTradeCpiLeg> {
+        (0..n as u16)
+            .map(|asset_index| percolator_prog::ix::BatchTradeCpiLeg {
+                asset_index,
+                size_q: POS_SCALE as i128,
+                fee_bps: 100,
+                limit_price: 0,
+            })
+            .collect()
+    };
 
-    // REJECT: 14*5=70 > 64.
-    let reject_tail = add_benign_tail_accounts(&mut env, REJECT_TAIL);
+    // ── 1. THE LEG BOUND. 12 legs is one past MATCHER_BATCH_MAX_LEGS=11. Before the #436 fix
+    // this passed every declared check and then died on compute with ProgramFailedToComplete;
+    // it is now refused up front and attributably.
+    let small_tail = add_benign_tail_accounts(&mut env, 1);
     let market_before = env.svm.get_account(&env.market).unwrap();
     let taker_before = env.svm.get_account(&taker_account).unwrap();
-    let lp_before = env.svm.get_account(&lp_account).unwrap();
     let ctx_before = env.svm.get_account(&ctx).unwrap();
     env.svm.expire_blockhash();
-    let rejected = env
+    let over = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs: legs.clone() },
+            ProgInstruction::BatchTradeCpi { legs: mk_legs(OVER_LEGS) },
             matcher_accounts(
-                taker.pubkey(),
-                env.market,
-                taker_account,
-                lp_account,
-                matcher_program,
-                ctx,
-                delegate,
-                &reject_tail,
+                taker.pubkey(), env.market, taker_account, lp_account,
+                matcher_program, ctx, delegate, &small_tail,
             ),
             &[&taker],
         )
-        .expect_err("oversized 14-leg x 5-tail (product 70 > budget 64) BatchTradeCpi must reject");
+        .expect_err("12 legs is past MATCHER_BATCH_MAX_LEGS=11 and must be REFUSED, not left to exhaust compute");
+    assert!(
+        over.contains("Custom(9)"),
+        "expected InvalidInstruction from the leg bound, got {over}"
+    );
+    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
+    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
+    assert_eq!(
+        env.svm.get_account(&ctx).unwrap(),
+        ctx_before,
+        "must reject BEFORE the matcher CPI"
+    );
+
+    // ── 2. THE PRODUCT BOUND still applies independently: 11*6=66 > 64. Both bounds exist
+    // because they constrain different things — legs bound COMPUTE, the product bounds the
+    // matcher's account fanout — and #436 was precisely the discovery that the product alone
+    // does not bound compute.
+    let reject_tail = add_benign_tail_accounts(&mut env, REJECT_TAIL);
+    env.svm.expire_blockhash();
+    let rejected = env
+        .send(
+            ProgInstruction::BatchTradeCpi { legs: mk_legs(MAX_LEGS) },
+            matcher_accounts(
+                taker.pubkey(), env.market, taker_account, lp_account,
+                matcher_program, ctx, delegate, &reject_tail,
+            ),
+            &[&taker],
+        )
+        .expect_err("11-leg x 6-tail (product 66 > budget 64) must reject on the fanout budget");
     assert!(
         rejected.contains("Custom(9)"),
         "expected InvalidInstruction, got {rejected}"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap(), market_before);
-    assert_eq!(env.svm.get_account(&taker_account).unwrap(), taker_before);
-    assert_eq!(env.svm.get_account(&lp_account).unwrap(), lp_before);
-    assert_eq!(
-        env.svm.get_account(&ctx).unwrap(),
-        ctx_before,
-        "must reject BEFORE matcher CPI"
-    );
 
-    // ALLOW: 14*4=56 <= 64, must complete a real matcher CPI.
+    // ── 3. THE BOUND ITSELF IS REACHABLE. Without this the two rejections above would be
+    // satisfied by a program that refuses everything — lowering MAX_LEGS to 0 would "pass" them.
+    //
+    // env.send already prepends cu_ix() (1,400,000), so this runs at Solana's ceiling, which is
+    // exactly where 11 was measured at 1,332,184 CU — 95% of the budget. That thin margin is the
+    // honest shape of this bound: NECESSARY, NOT SUFFICIENT. Per-leg cost varies with market
+    // state, so callers must still handle compute exhaustion at or below 11; the fix only
+    // removes 12..=16, which could never work anywhere.
     let allow_tail = add_benign_tail_accounts(&mut env, ALLOW_TAIL);
     env.svm.expire_blockhash();
     let allowed_cu = env
         .send(
-            ProgInstruction::BatchTradeCpi { legs },
+            ProgInstruction::BatchTradeCpi { legs: mk_legs(MAX_LEGS) },
             matcher_accounts(
-                taker.pubkey(),
-                env.market,
-                taker_account,
-                lp_account,
-                matcher_program,
-                ctx,
-                delegate,
-                &allow_tail,
+                taker.pubkey(), env.market, taker_account, lp_account,
+                matcher_program, ctx, delegate, &allow_tail,
             ),
             &[&taker],
         )
-        .expect("budgeted 14-leg x 4-tail (product 56 <= budget 64) BatchTradeCpi must execute");
-    assert!(allowed_cu < 1_400_000);
-    let taker_after = env.portfolio_state(taker_account);
+        .expect("11 legs is MATCHER_BATCH_MAX_LEGS and MUST execute");
+    assert!(
+        allowed_cu < 1_400_000,
+        "11 legs consumed {allowed_cu} CU, at or past the ceiling — the bound is no longer reachable"
+    );
     assert_eq!(
-        percolator::active_bitmap_count_ones(taker_after.active_bitmap),
-        LEGS as u32
+        percolator::active_bitmap_count_ones(env.portfolio_state(taker_account).active_bitmap),
+        MAX_LEGS as u32,
+        "all 11 legs must have actually filled"
     );
 }
 

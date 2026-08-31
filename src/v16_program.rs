@@ -9354,7 +9354,37 @@ pub mod processor {
 
     /// Maximum legs in a single matcher batch CPI: the matcher returns N*64 bytes via
     /// `set_return_data`, bounded by Solana's 1024-byte return-data cap.
-    const MATCHER_BATCH_MAX_LEGS: usize = 16;
+    /// Maximum legs in one BatchTradeCpi / BatchTradeNoCpi.
+    ///
+    /// LOWERED 16 -> 11 for #436 (2026-08-29), on MEASUREMENT rather than estimate. Sweeping the
+    /// two axes independently against the deployed program, with the tail held at 1:
+    ///
+    /// ```text
+    /// 2 legs    441,854 CU        10 legs  1,194,739 CU
+    /// 4 legs    585,796 CU        11 legs  1,332,184 CU   <- the most that fits
+    /// 8 legs    960,738 CU        12 legs  CU EXHAUSTED
+    /// ```
+    ///
+    /// A leg costs ~120,000 CU; a tail account ~840 CU — about 140x apart. So the sibling
+    /// `MATCHER_BATCH_TAIL_FANOUT_BUDGET` (legs * tail <= 64) bounds the WRONG QUANTITY: a
+    /// product of 12 (12 legs x 1 tail) FAILS while a product of 64 (4 legs x 16 tail) succeeds
+    /// comfortably at 596,913 CU. No value of a product budget is simultaneously safe and
+    /// useful — lowering it to 11 to catch 12x1 would forbid 4x16, which works.
+    ///
+    /// 12..=16 could therefore NEVER succeed. Advertising them was a lie that cost callers an
+    /// opaque failure: pass the declared check, then die on compute with
+    /// ProgramFailedToComplete. Lowering to 11 forbids nothing that works and converts that into
+    /// an immediate, attributable InvalidInstruction.
+    ///
+    /// NECESSARY, NOT SUFFICIENT. Per-leg cost varies with market state, so 11 legs is not
+    /// guaranteed to fit in every fixture — it is the ceiling observed in ours. Callers must
+    /// still handle CU exhaustion below this bound; this only removes the range that is
+    /// impossible everywhere.
+    ///
+    /// UPSTREAM DIVERGENCE, deliberate: aeyakovenko/percolator-prog still has 16. The product
+    /// budget itself came FROM upstream (91129168 "Cap batch CPI matcher tail fanout"), so this
+    /// defect exists there too and no upstream branch bounds the leg count. Worth sending back.
+    const MATCHER_BATCH_MAX_LEGS: usize = 11;
     // W4 [HIGH]: legs.len()<=16 and tail.len()<=32 are each bounded independently, but their
     // PRODUCT (up to 512) is not -- a batch with many legs AND a full matcher tail multiplies
     // per-leg tail-account validation/CPI-account-resolution work, blowing the CU budget before

@@ -94,7 +94,6 @@ x5_terminal_reclaim_liveness_via_rotate_no_lockout
 #       instead of bailing early, so the batch genuinely executes 56 fills and runs out of
 #       compute. The test asserts "product 56 <= budget 64 must execute", so the declared
 #       fanout budget of 64 is optimistic against the 1.4M CU ceiling.
-v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product
 
 # =========================================================================================
 # 2026-08-29 -- WHICH nft this baseline was measured against, and why that now matters.
@@ -116,4 +115,18 @@ v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product
 # re-hide the on-chain defect; instead CI asserts the defect is present and visible, and
 # goes red the moment that stops being true (i.e. when the nft is redeployed with the fix).
 # See ci/deployed-refs.env and tests/KNOWN_PARITY_DIVERGENCE.txt.
+# =========================================================================================
+
+# =========================================================================================
+# 2026-08-29 -- v16_bpf_batch_trade_cpi_tail_fanout_budget_rejects_oversized_product REMOVED.
+#
+# It was quarantined because it asserted a 14-leg x 4-tail batch MUST EXECUTE. It never could:
+# a leg costs ~120,000 CU, so 12+ legs exhaust the 1.4M ceiling whatever the tail size. The
+# test was encoding the bug, not catching it.
+#
+# #436 fix: MATCHER_BATCH_MAX_LEGS lowered 16 -> 11 (the measured ceiling), so 12..=16 are now
+# refused up front instead of passing every declared check and dying on compute. The test is
+# rewritten to pin BOTH bounds and the boundary: 12 legs -> Custom(9) from the leg bound,
+# 11x6=66 -> Custom(9) from the product bound, 11x5 -> executes. It passes; it is not
+# allowlisted.
 # =========================================================================================
