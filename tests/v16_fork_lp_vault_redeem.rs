@@ -2488,3 +2488,99 @@ fn issue_411_late_depositor_cannot_extract_more_than_deposited() {
         paid.saturating_sub(DEPOSIT)
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// #413 — a refill into a partially-consumed bucket is counted TWICE.
+//
+//   available = total_principal_atoms − (cumulative_loss_atoms − cumulative_recovery_atoms)
+//
+// The depositing handler books `total_principal_atoms += R`. Independently, the engine's
+// `consumed_liened_backing_num` falls by `min(R, provider_receivable_num)` as the receivable
+// is paid down, so the next `sync_backing_domain_ledger` sees `unavailable` DROP by R and
+// books `cumulative_recovery_atoms += R`. Both are true statements about the same atoms:
+//
+//   available = (P + R) − (L − R) = P − L + 2R
+//
+// Redemption then pays out against the inflated figure.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Move `atoms` of idle backing into the CONSUMED state with its matching provider
+/// receivable — the shape a real consumption leaves behind.
+fn consume_backing(env: &mut Env, domain: u16, atoms: u128) {
+    let mut acct = env.svm.get_account(&env.market).expect("market");
+    let (cfg, mut group) = state::read_market(&acct.data).expect("read market");
+    let scaled = atoms * percolator::BOUND_SCALE;
+    let b = &mut group.source_backing_buckets[domain as usize];
+    b.fresh_unliened_backing_num = b
+        .fresh_unliened_backing_num
+        .checked_sub(scaled)
+        .expect("enough idle backing to consume");
+    b.consumed_liened_backing_num += scaled;
+    // All THREE counters, per the engine's own consumption sequence (v16.rs:1159-1178):
+    // consumed_liened_backing_num, spent_backing_num and provider_receivable_num move
+    // together. Setting only two leaves the bucket in a shape the engine rejects with
+    // EngineInvalidConfig — a fixture that is wrong in a way that looks like a program bug.
+    let sc = &mut group.source_credit[domain as usize];
+    sc.spent_backing_num += scaled;
+    sc.provider_receivable_num += scaled;
+    state::write_market(&mut acct.data, &cfg, &group).expect("write market");
+    env.svm.set_account(env.market, acct).unwrap();
+}
+
+fn available_principal(env: &Env) -> u128 {
+    let l = ledger(env);
+    l.total_principal_atoms - (l.cumulative_loss_atoms - l.cumulative_recovery_atoms)
+}
+
+#[test]
+fn issue_413_a_refill_is_not_counted_as_both_principal_and_recovery() {
+    const CONSUMED: u128 = 400_000;
+    const REFILL: u128 = 300_000;
+    let mut env = setup_vault(0);
+    let _genesis = new_depositor(&mut env, DEPOSIT);
+
+    // Consume part of the backing, then TOUCH the ledger so the loss is observed. Without
+    // this the loss and the recovery would net out inside one sync and the double-count
+    // would be invisible — the bug needs the loss to be booked first.
+    consume_backing(&mut env, DOMAIN, CONSUMED);
+    env.svm.expire_blockhash();
+    let _touch = new_depositor(&mut env, 1);
+
+    let before = ledger(&env);
+    println!(
+        "    [#413] after consumption: principal={} loss={} recovery={}",
+        before.total_principal_atoms, before.cumulative_loss_atoms, before.cumulative_recovery_atoms
+    );
+
+    // The refill: new principal that also pays down the provider receivable.
+    env.svm.expire_blockhash();
+    let _refill = new_depositor(&mut env, REFILL);
+
+    // The refill's effect on `consumed_liened_backing_num` is NOT observed by the sync in
+    // the same instruction: `handle_deposit_to_lp_vault` syncs FIRST (to price the deposit)
+    // and calls `add_fresh_counterparty_backing_view` afterwards. The recovery is therefore
+    // booked on the NEXT sync. Reading the ledger without this touch measures the state one
+    // step too early and reports a 1-atom discrepancy instead of the real one.
+    env.svm.expire_blockhash();
+    let _touch2 = new_depositor(&mut env, 1);
+
+    let after = ledger(&env);
+    let avail = available_principal(&env);
+    // +1 for the touch deposit above, which is real principal like any other.
+    let expected = before.total_principal_atoms + REFILL + 1
+        - (before.cumulative_loss_atoms - before.cumulative_recovery_atoms);
+    println!(
+        "    [#413] after refill: principal={} loss={} recovery={}",
+        after.total_principal_atoms, after.cumulative_loss_atoms, after.cumulative_recovery_atoms
+    );
+    println!("    [#413] available={avail} expected={expected} over={}", avail.saturating_sub(expected));
+
+    assert_eq!(
+        avail, expected,
+        "#413 — the refill was counted twice: once as principal by the deposit handler and \
+         again as a recovery by sync, because paying down the provider receivable lowers \
+         consumed_liened_backing_num. available is overstated by {} atoms, and redemption \
+         pays out against it.",
+        avail.saturating_sub(expected)
+    );
+}

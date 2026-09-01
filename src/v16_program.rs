@@ -15163,6 +15163,30 @@ pub mod processor {
                 backing_num,
                 crate::constants::LP_VAULT_BACKING_EXPIRY_SLOT,
             )?;
+            // #413: RE-BASELINE the impairment observation before booking the principal.
+            //
+            // `add_fresh_counterparty_backing_view` pays down the provider receivable
+            // (`refill = min(amount_num, provider_receivable_num)`), which LOWERS
+            // `bucket.consumed_liened_backing_num`. `sync_backing_domain_ledger` books any
+            // drop in unavailable principal as `cumulative_recovery_atoms`, and it cannot
+            // tell a genuine loss reversal from an LP putting new money in.
+            //
+            // Without this, the same atoms are counted twice — once here as principal, and
+            // again on the NEXT sync as a recovery that reduces net impairment:
+            //
+            //     available = (P + R) − (L − R) = P − L + 2R
+            //
+            // Measured before the fix: a 300_000 refill overstated available principal by
+            // exactly 300_000, and redemption pays out against that figure.
+            //
+            // The sync above ran against the PRE-refill bucket, so re-reading it here and
+            // pinning the watermark is what makes the refill invisible to the next sync.
+            // Only the baseline moves; no loss or recovery is booked either way.
+            {
+                let (_, bucket_after) = backing_domain_parts_view(&group, domain)?;
+                ledger.last_observed_unavailable_principal_atoms =
+                    backing_unavailable_principal_atoms(&bucket_after)?;
+            }
             ledger.total_principal_atoms = ledger
                 .total_principal_atoms
                 .checked_add(amount)
@@ -15593,21 +15617,40 @@ pub mod processor {
         // ── Destination side: deposit the same backing. ──
         {
             let mut to_ledger_data = to_ledger_ai.try_borrow_mut_data()?;
+            // #413: sync against the PRE-refill bucket, exactly as the deposit path does.
+            //
+            // `add_fresh_counterparty_backing_view` pays down the provider receivable and
+            // so LOWERS `consumed_liened_backing_num`. Syncing AFTER it — which is what
+            // this block used to do — makes `sync_backing_domain_ledger` read that drop as
+            // `cumulative_recovery_atoms`, while the principal is added just below. The
+            // same atoms then count twice and available principal is overstated by the
+            // moved amount.
+            //
+            // Order matters and is the whole fix: sync first (so genuine losses and
+            // earnings since the last observation are still booked), refill, then pin the
+            // watermark to the post-refill value so the NEXT sync sees no phantom recovery.
+            // Suppressing the sync outright would have been simpler and wrong — it would
+            // also swallow real impairment that happened before this instruction.
+            let (_, to_bucket_pre) = backing_domain_parts_view(&group, to_domain as usize)?;
+            let (mut to_ledger, to_initialized) = read_or_new_backing_domain_ledger(
+                &to_ledger_data,
+                market_ai.key.to_bytes(),
+                registry_pda.to_bytes(),
+                to_domain,
+                &to_bucket_pre,
+            )?;
+            sync_backing_domain_ledger(&mut to_ledger, &to_bucket_pre)?;
             add_fresh_counterparty_backing_view(
                 &mut group,
                 to_domain as usize,
                 backing_num,
                 crate::constants::LP_VAULT_BACKING_EXPIRY_SLOT,
             )?;
-            let (_, to_bucket) = backing_domain_parts_view(&group, to_domain as usize)?;
-            let (mut to_ledger, to_initialized) = read_or_new_backing_domain_ledger(
-                &to_ledger_data,
-                market_ai.key.to_bytes(),
-                registry_pda.to_bytes(),
-                to_domain,
-                &to_bucket,
-            )?;
-            sync_backing_domain_ledger(&mut to_ledger, &to_bucket)?;
+            {
+                let (_, to_bucket_post) = backing_domain_parts_view(&group, to_domain as usize)?;
+                to_ledger.last_observed_unavailable_principal_atoms =
+                    backing_unavailable_principal_atoms(&to_bucket_post)?;
+            }
             to_ledger.total_principal_atoms = to_ledger
                 .total_principal_atoms
                 .checked_add(amount)
@@ -16646,6 +16689,18 @@ pub mod processor {
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?, // FB += a·BOUND_SCALE
                 crate::constants::LP_VAULT_BACKING_EXPIRY_SLOT,
             )?;
+            // #413: re-baseline before booking the principal — same reasoning as the
+            // deposit and rebalance paths. The refill above lowers
+            // `consumed_liened_backing_num`, and the NEXT sync would otherwise read that
+            // drop as `cumulative_recovery_atoms` while these same atoms are also being
+            // added as principal directly below. The sync at the top of this handler ran
+            // against the pre-refill bucket, so pinning the watermark here is what keeps
+            // the two from counting the same value twice.
+            {
+                let (_, bucket_after) = backing_domain_parts_view(&group, domain)?;
+                ledger.last_observed_unavailable_principal_atoms =
+                    backing_unavailable_principal_atoms(&bucket_after)?;
+            }
             // The LP-visible half: same shares, more principal ⇒ higher NAV ⇒ a
             // strictly larger redeemable claim for every existing LP.
             ledger.total_principal_atoms = ledger
