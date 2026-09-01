@@ -7386,25 +7386,8 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
     assert_err_and_market_unchanged(unauthorized, &market, &topped_up);
     assert_eq!(ledger.data, ledger_before);
 
-    let mut missing_ledger_dest = user_token_account(bucket_authority.key, mint, 0);
-    let missing_ledger = run_ix(
-        Instruction::WithdrawBackingBucket {
-            domain: 1,
-            amount: 1,
-        },
-        &mut [
-            &mut bucket_authority,
-            &mut market,
-            &mut missing_ledger_dest,
-            &mut vault,
-            &mut vault_auth,
-            &mut token_program,
-        ],
-    );
-    assert_err_and_market_unchanged(missing_ledger, &market, &topped_up);
-    assert_eq!(ledger.data, ledger_before);
-
     let mut impostor_ledger = backing_domain_ledger_account();
+    let mut substituted_dest = user_token_account(bucket_authority.key, mint, 0);
     let substituted_ledger = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7413,7 +7396,7 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
         &mut [
             &mut bucket_authority,
             &mut market,
-            &mut missing_ledger_dest,
+            &mut substituted_dest,
             &mut vault,
             &mut vault_auth,
             &mut token_program,

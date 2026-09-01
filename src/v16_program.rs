@@ -10598,19 +10598,38 @@ pub mod processor {
         let vault_token = account(accounts, 3)?;
         let vault_authority_ai = account(accounts, 4)?;
         let token_program = account(accounts, 5)?;
-        // Principal withdrawals must always update the backing-domain ledger.
-        // Treating this trailing account as optional allowed callers to skip
-        // both the principal-consistency check and the ledger decrement.
-        let ledger_ai = account(accounts, 6)?;
+        // ⚠️ OPTIONAL, and it MUST stay optional. #433 asked for it to be mandatory and a
+        // first fix (45bba89e) made it so; that was DEPLOYED and immediately stranded funds.
+        //
+        // The backing-domain ledger PDA is only ever ALLOCATED by the LP-vault handlers.
+        // `write_or_init_backing_domain_ledger` writes into an existing buffer — nothing on
+        // this path can create the account. So on any market without an LP vault the ledger
+        // does not exist, `expect_owner(ledger_ai, program_id)` fails, and backing deposited
+        // through the 5-account `TopUpBackingBucket` could never be withdrawn again. That is
+        // strictly worse than the accounting bypass #433 reports.
+        //
+        // Upstream keeps it optional too (`upstream/main` handle_withdraw_backing_bucket,
+        // `accounts.get(6)` + `if let Some`), which is corroboration rather than coincidence.
+        //
+        // #433 IS REAL and is still open: when the account is omitted, both the
+        // principal-consistency guard and the decrement are skipped. Closing it needs the
+        // ledger to be creatable on this path (payer + system program) or mandatory on
+        // TopUpBackingBucket first — not a bare `account(accounts, 6)?`.
+        let ledger_ai = accounts.get(6);
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
         expect_owner(market_ai, program_id)?;
-        expect_writable(ledger_ai)?;
-        expect_owner(ledger_ai, program_id)?;
-        let (ledger_pda, _) = state::derive_lp_backing_ledger(program_id, market_ai.key, domain);
-        expect_key(ledger_ai, &ledger_pda)?;
+        if let Some(ledger_ai) = ledger_ai {
+            expect_writable(ledger_ai)?;
+            expect_owner(ledger_ai, program_id)?;
+            // KEPT from 45bba89e: when the ledger IS supplied it is pinned to its PDA. The
+            // optional path never had this, so a caller could pass any program-owned account.
+            let (ledger_pda, _) =
+                state::derive_lp_backing_ledger(program_id, market_ai.key, domain);
+            expect_key(ledger_ai, &ledger_pda)?;
+        }
         verify_token_program(token_program)?;
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -10674,31 +10693,38 @@ pub mod processor {
             };
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
-            let mut ledger_data = ledger_ai.try_borrow_mut_data()?;
-            let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
-                &ledger_data,
-                market_ai.key.to_bytes(),
-                ledger_authority,
-                domain,
-                &bucket,
-            )?;
-            sync_backing_domain_ledger(&mut ledger, &bucket)?;
-            if amount > ledger.total_principal_atoms {
-                return Err(PercolatorError::EngineCounterUnderflow.into());
+            if let Some(ledger_ai) = ledger_ai {
+                let mut ledger_data = ledger_ai.try_borrow_mut_data()?;
+                let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
+                    &ledger_data,
+                    market_ai.key.to_bytes(),
+                    ledger_authority,
+                    domain,
+                    &bucket,
+                )?;
+                sync_backing_domain_ledger(&mut ledger, &bucket)?;
+                if amount > ledger.total_principal_atoms {
+                    return Err(PercolatorError::EngineCounterUnderflow.into());
+                }
+                group
+                    .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
+                    .map_err(map_v16_error)?;
+                ledger.total_principal_atoms = ledger
+                    .total_principal_atoms
+                    .checked_sub(amount)
+                    .ok_or(PercolatorError::EngineCounterUnderflow)?;
+                ledger.total_principal_withdrawn_atoms = ledger
+                    .total_principal_withdrawn_atoms
+                    .checked_add(amount)
+                    .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+                group.validate_shape().map_err(map_v16_error)?;
+                write_or_init_backing_domain_ledger(&mut ledger_data, &ledger, initialized)?;
+            } else {
+                group
+                    .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
+                    .map_err(map_v16_error)?;
+                group.validate_shape().map_err(map_v16_error)?;
             }
-            group
-                .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
-                .map_err(map_v16_error)?;
-            ledger.total_principal_atoms = ledger
-                .total_principal_atoms
-                .checked_sub(amount)
-                .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            ledger.total_principal_withdrawn_atoms = ledger
-                .total_principal_withdrawn_atoms
-                .checked_add(amount)
-                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
-            group.validate_shape().map_err(map_v16_error)?;
-            write_or_init_backing_domain_ledger(&mut ledger_data, &ledger, initialized)?;
         }
 
         let bump_arr = [bump];

@@ -3785,7 +3785,23 @@ fn v16_bpf_withdraw_backing_bucket_requires_canonical_ledger() {
         withdraw_accounts(None),
         &[&env.admin],
     );
-    assert!(omitted.is_err(), "omitting the ledger must fail closed");
+    // ⚠️ #433 IS OPEN, AND THIS ASSERTS THE DEFECT RATHER THAN THE FIX.
+    //
+    // Omitting the ledger SUCCEEDS: the withdrawal goes through and the ledger is never
+    // decremented. Making it mandatory (45bba89e) closed #433 and was deployed — and it
+    // STRANDED FUNDS. The ledger PDA is only ever allocated by the LP-vault handlers, so on
+    // a market with no LP vault `expect_owner(ledger_ai, program_id)` fails and backing
+    // deposited via the 5-account TopUpBackingBucket becomes unwithdrawable. That is worse
+    // than the accounting bypass it closed, so it was reverted. Upstream keeps the account
+    // optional too.
+    //
+    // If this ever REJECTS again, a fix landed — check it created a path for the ledger to
+    // EXIST (payer + system program here, or mandatory on TopUpBackingBucket) before
+    // treating it as done.
+    assert!(
+        omitted.is_ok(),
+        "#433: omitting the ledger should still be accepted until the fix creates the PDA"
+    );
 
     env.svm.expire_blockhash();
     let substituted = send_tx(
@@ -3800,10 +3816,12 @@ fn v16_bpf_withdraw_backing_bucket_requires_canonical_ledger() {
         substituted.is_err(),
         "a noncanonical program-owned ledger must fail closed"
     );
-    assert_eq!(env.svm.get_account(&env.market).unwrap().data, market_before);
+    // The ledger account itself is untouched by both attempts, and the SUBSTITUTED one is
+    // still refused — that PDA pin is the part of 45bba89e worth keeping and it survived the
+    // revert. The market/vault totals are NOT re-asserted here: the omitted withdrawal above
+    // succeeded, so they legitimately moved.
     assert_eq!(env.svm.get_account(&ledger).unwrap().data, ledger_before);
-    assert_eq!(env.token_amount(env.vault), vault_before);
-    assert_eq!(env.token_amount(dest), dest_before);
+    let _ = (market_before, vault_before, dest_before);
 
     env.svm.expire_blockhash();
     send_tx(
@@ -3820,10 +3838,19 @@ fn v16_bpf_withdraw_backing_bucket_requires_canonical_ledger() {
         &env.svm.get_account(&ledger).unwrap().data,
     )
     .unwrap();
-    assert_eq!(ledger_after.total_principal_atoms, 60);
+    // THE DIVERGENCE IS THE POINT, and it is #433 stated in numbers.
+    //
+    // Two withdrawals of 40 happened: the ledger-less one (accepted, unbooked) and the
+    // canonical one (accepted, booked). The ledger therefore records ONE of them while the
+    // vault paid out BOTH — 100 - 40 - 40 = 20 on chain against 60 on the books.
+    //
+    // That 40-atom gap between `total_principal_atoms` and the real vault balance is exactly
+    // the accounting bypass #433 reports, measured. When #433 is fixed properly these two
+    // must agree again.
+    assert_eq!(ledger_after.total_principal_atoms, 60, "ledger booked only the canonical withdrawal");
     assert_eq!(ledger_after.total_principal_withdrawn_atoms, 40);
-    assert_eq!(env.token_amount(env.vault), 60);
-    assert_eq!(env.token_amount(dest), 40);
+    assert_eq!(env.token_amount(env.vault), 20, "vault paid BOTH withdrawals — the #433 gap");
+    assert_eq!(env.token_amount(dest), 80, "destination received both 40s");
 }
 
 #[test]
