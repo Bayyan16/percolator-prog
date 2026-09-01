@@ -634,6 +634,16 @@ pub mod error {
             V16Error::InsufficientInitialMargin => {
                 PercolatorError::EngineInsufficientInitialMargin
             }
+            // percolator#150 moved the zero-share deposit reject OUT of the wrapper and
+            // INTO `lp_vault::lp_shares_for_deposit`, so the engine can now raise this
+            // directly. It maps onto the Custom(41) the wrapper already raises at :14974
+            // and :16373, so the on-chain error code is unchanged whichever layer rejects.
+            //
+            // This match is EXHAUSTIVE, which is the point: adding a V16Error variant
+            // upstream breaks this build until the arm exists. That is a feature — it is
+            // the only thing coupling the two repos at compile time. The engine's own CI
+            // was green with this variant added and the wrapper unbuildable.
+            V16Error::LpVaultZeroSharesMinted => PercolatorError::LpVaultZeroSharesMinted,
         };
         mapped.into()
     }
