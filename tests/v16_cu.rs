@@ -3957,7 +3957,7 @@ fn v16_bpf_permissionless_market_shutdown_force_closes_recovers_and_reuses_slot(
     env.svm
         .airdrop(&insurance_operator.pubkey(), 1_000_000_000)
         .unwrap();
-    env.configure_permissionless_resolve_with_cu(100, 5);
+    env.configure_permissionless_resolve_with_cu(9000, 5);
     env.update_market_init_fee_policy_with_cu(25);
 
     env.svm.warp_to_slot(1);
@@ -7208,8 +7208,8 @@ fn v16_bpf_close_resolved_pays_positive_pnl_through_engine_ledger() {
 #[test]
 fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
     let mut env = V16CuEnv::new();
-    let configure_cu = env.configure_permissionless_resolve_with_cu(5, 1);
-    let stale_resolve_cu = env.resolve_stale_permissionless_with_cu(5);
+    let configure_cu = env.configure_permissionless_resolve_with_cu(9000, 1);
+    let stale_resolve_cu = env.resolve_stale_permissionless_with_cu(9000);
     println!(
         "v16 permissionless stale resolve CU configure={configure_cu}, resolve={stale_resolve_cu}"
     );
@@ -7228,10 +7228,10 @@ fn v16_bpf_permissionless_stale_resolve_is_bounded_and_oracle_free() {
 
     let market_data = env.svm.get_account(&env.market).unwrap().data;
     let (cfg, group) = state::read_market(&market_data).unwrap();
-    assert_eq!(cfg.permissionless_resolve_stale_slots, 5);
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 9000);
     assert_eq!(cfg.force_close_delay_slots, 1);
     assert_eq!(group.mode, percolator::MarketModeV16::Resolved);
-    assert_eq!(group.resolved_slot, 5);
+    assert_eq!(group.resolved_slot, 9000);
 }
 
 #[test]
@@ -9103,7 +9103,7 @@ fn v16_attack_non_active_asset_cannot_enable_backing_fee_batch_gate() {
         let mut env = V16CuEnv::new_with_market_params_and_price_move(1, 1_000, 1_000, 500);
         env.configure_auth_mark_for_asset_as_admin(0, 1, 100);
         if action == percolator_prog::processor::ASSET_ACTION_SHUTDOWN {
-            env.configure_permissionless_resolve_with_cu(100, 5);
+            env.configure_permissionless_resolve_with_cu(9000, 5);
         }
         env.update_market_init_fee_policy_with_cu(1);
 
@@ -9980,18 +9980,18 @@ fn v16_hlock_stays_set_while_any_negative_pnl_account_remains() {
 fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
-    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_permissionless_resolve_with_cu(9000, 5);
     env.configure_auth_mark_with_cu(0, 100);
 
-    env.svm.warp_to_slot(3);
+    env.svm.warp_to_slot(8998);
     env.push_auth_mark_with_cu(3, 100);
 
     // Non-vacuous fresh control: before the stale boundary, marketauth can still tune the policy.
-    env.svm.warp_to_slot(4);
+    env.svm.warp_to_slot(8999);
     env.svm.expire_blockhash();
     let fresh = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
-            stale_slots: 6,
+            stale_slots: 9000,
             force_close_delay_slots: 6,
         },
         vec![
@@ -10001,13 +10001,13 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
         &[&admin],
     );
     assert!(fresh.is_ok(), "fresh ConfigurePermissionlessResolve remains reachable: {fresh:?}");
-    assert_eq!(env.market_state().0.permissionless_resolve_stale_slots, 6);
+    assert_eq!(env.market_state().0.permissionless_resolve_stale_slots, 9000);
 
-    env.svm.warp_to_slot(40);
+    env.svm.warp_to_slot(18035);
     let (stale_cfg, stale_group) = env.market_state();
     assert_eq!(stale_group.mode, MarketModeV16::Live);
     assert!(
-        oracle_v16::permissionless_stale_matured(&stale_cfg, 40),
+        oracle_v16::permissionless_stale_matured(&stale_cfg, 18035),
         "test setup must be beyond the configured stale boundary"
     );
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -10015,7 +10015,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
     env.svm.expire_blockhash();
     let stale = env.send(
         ProgInstruction::ConfigurePermissionlessResolve {
-            stale_slots: 1_000,
+            stale_slots: 9000,
             force_close_delay_slots: 1_000,
         },
         vec![
@@ -10030,7 +10030,7 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
 
     env.svm.expire_blockhash();
     let resolve = env.send(
-        ProgInstruction::ResolveStalePermissionless { now_slot: 0 },
+        ProgInstruction::ResolveStalePermissionless { now_slot: 16994 },
         vec![AccountMeta::new(env.market, false)],
         &[],
     );
@@ -10045,18 +10045,18 @@ fn v16_attack_configure_permissionless_resolve_rejects_when_resolve_matured() {
 fn v16_attack_marketauth_lifecycle_actions_reject_when_resolve_matured() {
     let mut env = V16CuEnv::new();
     let admin = env.admin.insecure_clone();
-    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_permissionless_resolve_with_cu(9000, 5);
     env.configure_auth_mark_with_cu(0, 100);
 
     env.svm.warp_to_slot(1);
     env.activate_asset(1, 1, 100);
-    env.svm.warp_to_slot(2);
+    env.svm.warp_to_slot(8997);
     env.activate_asset(2, 2, 100);
-    env.svm.warp_to_slot(3);
+    env.svm.warp_to_slot(8998);
     env.push_auth_mark_with_cu(3, 100);
 
     // Non-vacuous fresh controls: marketauth lifecycle actions are reachable before stale maturity.
-    env.svm.warp_to_slot(4);
+    env.svm.warp_to_slot(8999);
     env.update_asset_lifecycle_as_admin_with_cu(percolator_prog::processor::ASSET_ACTION_DRAIN_ONLY, 1, 0, 0);
     assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::DrainOnly,
         "fresh marketauth DrainOnly path is reachable");
@@ -10064,10 +10064,10 @@ fn v16_attack_marketauth_lifecycle_actions_reject_when_resolve_matured() {
     assert_eq!(env.market_state().1.assets[1].lifecycle, AssetLifecycleV16::Retired,
         "fresh marketauth Retire path is reachable");
 
-    env.svm.warp_to_slot(40);
+    env.svm.warp_to_slot(18035);
     let (stale_cfg, stale_group) = env.market_state();
     assert_eq!(stale_group.mode, MarketModeV16::Live);
-    assert!(oracle_v16::permissionless_stale_matured(&stale_cfg, 40),
+    assert!(oracle_v16::permissionless_stale_matured(&stale_cfg, 18035),
         "test setup must be beyond the permissionless resolve stale boundary");
     assert_eq!(stale_group.assets[2].lifecycle, AssetLifecycleV16::Active);
 
@@ -10132,7 +10132,7 @@ fn v16_attack_marketauth_lifecycle_actions_reject_when_resolve_matured() {
 fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     const PRICE: u64 = 100;
     let mut env = V16CuEnv::new_with_market_params_and_price_move(2, 10_000, 10_000, 10_000);
-    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_permissionless_resolve_with_cu(9000, 5);
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
     env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
@@ -10158,14 +10158,14 @@ fn v16_attack_non_base_trade_rejects_after_base_resolve_matured() {
     {
         let mut account = env.svm.get_account(&env.market).unwrap();
         let mut profile = state::read_asset_oracle_profile(&account.data, 1).unwrap();
-        profile.last_good_oracle_slot = 7;
+        profile.last_good_oracle_slot = 9002;
         state::write_asset_oracle_profile(&mut account.data, 1, &profile).unwrap();
         env.svm.set_account(env.market, account).unwrap();
     }
-    env.svm.warp_to_slot(8);
+    env.svm.warp_to_slot(9003);
     let (stale_cfg, _stale_group) = env.market_state();
     assert!(
-        oracle_v16::permissionless_stale_matured(&stale_cfg, 8),
+        oracle_v16::permissionless_stale_matured(&stale_cfg, 9003),
         "test setup must make the base anchor resolve-matured"
     );
 
@@ -10209,7 +10209,7 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
 
-    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_permissionless_resolve_with_cu(9000, 5);
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
     env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
@@ -10249,13 +10249,13 @@ fn v16_attack_non_base_tradecpi_rejects_before_matcher_after_base_resolve_mature
     {
         let mut account = env.svm.get_account(&env.market).unwrap();
         let mut profile = state::read_asset_oracle_profile(&account.data, 1).unwrap();
-        profile.last_good_oracle_slot = 7;
+        profile.last_good_oracle_slot = 9002;
         state::write_asset_oracle_profile(&mut account.data, 1, &profile).unwrap();
         env.svm.set_account(env.market, account).unwrap();
     }
-    env.svm.warp_to_slot(8);
+    env.svm.warp_to_slot(9003);
     let (stale_cfg, _stale_group) = env.market_state();
-    assert!(oracle_v16::permissionless_stale_matured(&stale_cfg, 8),
+    assert!(oracle_v16::permissionless_stale_matured(&stale_cfg, 9003),
         "test setup must make the base anchor resolve-matured");
 
     let market_before = env.svm.get_account(&env.market).unwrap();
@@ -10293,7 +10293,7 @@ fn v16_attack_non_base_batchtradecpi_rejects_before_matcher_after_base_resolve_m
     let matcher_bytes = std::fs::read(matcher_program_path()).expect("read matcher BPF");
     env.svm.add_program(matcher_program, &matcher_bytes);
 
-    env.configure_permissionless_resolve_with_cu(5, 5);
+    env.configure_permissionless_resolve_with_cu(9000, 5);
     env.svm.warp_to_slot(1);
     env.configure_auth_mark_for_asset_as_admin(0, 1, PRICE);
     env.configure_auth_mark_for_asset_as_admin(1, 1, PRICE);
@@ -10343,13 +10343,13 @@ fn v16_attack_non_base_batchtradecpi_rejects_before_matcher_after_base_resolve_m
     {
         let mut account = env.svm.get_account(&env.market).unwrap();
         let mut profile = state::read_asset_oracle_profile(&account.data, 1).unwrap();
-        profile.last_good_oracle_slot = 7;
+        profile.last_good_oracle_slot = 9002;
         state::write_asset_oracle_profile(&mut account.data, 1, &profile).unwrap();
         env.svm.set_account(env.market, account).unwrap();
     }
-    env.svm.warp_to_slot(8);
+    env.svm.warp_to_slot(9003);
     let (stale_cfg, _stale_group) = env.market_state();
-    assert!(oracle_v16::permissionless_stale_matured(&stale_cfg, 8),
+    assert!(oracle_v16::permissionless_stale_matured(&stale_cfg, 9003),
         "test setup must make the base anchor resolve-matured");
 
     let market_before = env.svm.get_account(&env.market).unwrap();

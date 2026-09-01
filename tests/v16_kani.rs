@@ -1185,13 +1185,13 @@ fn kani_v16_admin_policy_payloads_reject_trailing_byte() {
     );
     assert_rejects_trailing_byte(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         extra,
     );
     assert_rejects_trailing_byte(
-        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        Instruction::ResolveStalePermissionless { now_slot: 9000 },
         extra,
     );
 }

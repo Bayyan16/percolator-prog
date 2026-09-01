@@ -2582,7 +2582,7 @@ fn v16_wrapper_shutdown_asset_force_closes_drains_retires_and_reuses_slot() {
 
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 100,
+            stale_slots: 9000,
             force_close_delay_slots: 5,
         },
         &mut [&mut admin, &mut market],
@@ -2932,7 +2932,7 @@ fn v16_wrapper_permissionless_market_shutdown_force_closes_recovers_and_reuses_s
 
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 100,
+            stale_slots: 9000,
             force_close_delay_slots: 5,
         },
         &mut [&mut admin, &mut market],
@@ -3251,7 +3251,7 @@ fn v16_wrapper_shutdown_admin_drain_timeout_ledgers_and_backing_earnings() {
 
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 100,
+            stale_slots: 9000,
             force_close_delay_slots: 5,
         },
         &mut [&mut admin, &mut market],
@@ -5083,7 +5083,7 @@ fn v16_wrapper_retired_asset_profile_cannot_refresh_market_liveness() {
     );
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -5145,7 +5145,7 @@ fn v16_wrapper_retired_asset_profile_cannot_refresh_market_liveness() {
     assert_err_and_market_unchanged(stale_refresh, &market, &before_push);
 
     run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 6 },
+        Instruction::ResolveStalePermissionless { now_slot: 9001 },
         &mut [&mut market],
     )
     .unwrap();
@@ -6439,7 +6439,7 @@ fn v16_wrapper_top_up_paths_reject_after_permissionless_resolve_maturity() {
     .unwrap();
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -6447,8 +6447,8 @@ fn v16_wrapper_top_up_paths_reject_after_permissionless_resolve_maturity() {
     .unwrap();
     {
         let (cfg, mut group) = state::read_market(&market.data).unwrap();
-        group.current_slot = 5;
-        group.slot_last = 5;
+        group.current_slot = 9000;
+        group.slot_last = 9000;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
 
@@ -9862,7 +9862,7 @@ fn v16_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_bu
 
     let attacker_update = run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut attacker, &mut market],
@@ -9883,7 +9883,7 @@ fn v16_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_bu
 
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -9891,7 +9891,7 @@ fn v16_wrapper_permissionless_resolve_policy_is_admin_gated_and_enables_admin_bu
     .unwrap();
     let (cfg, group) = state::read_market(&market.data).unwrap();
     assert_eq!(group.mode, MarketModeV16::Live);
-    assert_eq!(cfg.permissionless_resolve_stale_slots, 5);
+    assert_eq!(cfg.permissionless_resolve_stale_slots, 9000);
     assert_eq!(cfg.force_close_delay_slots, 1);
 
     // v17: admin (marketauth) cannot be burned on a live market; verify rejection instead.
@@ -15519,7 +15519,7 @@ fn v16_wrapper_cure_and_cancel_close_rejects_after_permissionless_resolve_maturi
     seed_cancellable_close_progress(&mut market, &mut portfolio);
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -15527,8 +15527,8 @@ fn v16_wrapper_cure_and_cancel_close_rejects_after_permissionless_resolve_maturi
     .unwrap();
     {
         let (cfg, mut group) = state::read_market(&market.data).unwrap();
-        group.current_slot = 5;
-        group.slot_last = 5;
+        group.current_slot = 9000;
+        group.slot_last = 9000;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
 
@@ -15780,7 +15780,7 @@ fn v16_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
     deposit(&mut owner_b, &mut market, &mut portfolio_b, 1_000_000);
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -15789,13 +15789,13 @@ fn v16_wrapper_permissionless_stale_resolve_requires_hard_stale_maturity() {
 
     let before = market.data.clone();
     let early = run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 4 },
+        Instruction::ResolveStalePermissionless { now_slot: 8999 },
         &mut [&mut market],
     );
     assert_err_and_market_unchanged(early, &market, &before);
 
     run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        Instruction::ResolveStalePermissionless { now_slot: 9000 },
         &mut [&mut market],
     )
     .unwrap();
@@ -15856,7 +15856,7 @@ fn v16_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tai
     .unwrap();
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -15865,19 +15865,19 @@ fn v16_wrapper_permissionless_stale_resolve_uses_stamped_liveness_not_oracle_tai
 
     let before = market.data.clone();
     let caller_chosen_stale_tail = run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 14 },
+        Instruction::ResolveStalePermissionless { now_slot: 9009 },
         &mut [&mut market, &mut stale_oracle],
     );
     assert_err_and_market_unchanged(caller_chosen_stale_tail, &market, &before);
 
     run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 15 },
+        Instruction::ResolveStalePermissionless { now_slot: 9010 },
         &mut [&mut market, &mut stale_oracle],
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
     assert_eq!(group.mode, MarketModeV16::Resolved);
-    assert_eq!(group.resolved_slot, 15);
+    assert_eq!(group.resolved_slot, 9010);
 }
 
 #[test]
@@ -15896,7 +15896,7 @@ fn v16_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
     deposit(&mut owner_b, &mut market, &mut portfolio_b, 1_000_000);
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 5,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -15904,8 +15904,8 @@ fn v16_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
     .unwrap();
     {
         let (cfg, mut group) = state::read_market(&market.data).unwrap();
-        group.current_slot = 5;
-        group.slot_last = 5;
+        group.current_slot = 9000;
+        group.slot_last = 9000;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
 
@@ -15957,7 +15957,7 @@ fn v16_wrapper_permissionless_resolve_maturity_blocks_manual_live_trade_race() {
     assert_eq!(portfolio_a.data, before_a);
 
     run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        Instruction::ResolveStalePermissionless { now_slot: 9000 },
         &mut [&mut market],
     )
     .unwrap();
@@ -16245,7 +16245,7 @@ fn v16_wrapper_close_resolved_enforces_configured_force_close_delay() {
     init_portfolio(&mut owner_for_init, &mut market, &mut portfolio);
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 10,
+            stale_slots: 9000,
             force_close_delay_slots: 5,
         },
         &mut [&mut admin, &mut market],
@@ -16286,7 +16286,7 @@ fn v16_wrapper_close_resolved_becomes_permissionless_after_force_close_delay() {
     init_portfolio(&mut owner_for_init, &mut market, &mut portfolio);
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 10,
+            stale_slots: 9000,
             force_close_delay_slots: 5,
         },
         &mut [&mut admin, &mut market],
@@ -16522,7 +16522,7 @@ fn v16_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_s
     );
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 4,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -16554,7 +16554,7 @@ fn v16_wrapper_hybrid_hard_stale_uses_permissionless_resolve_not_recovery_kill_s
     assert_err_and_market_unchanged(rejected_recovery, &market, &before_recovery);
 
     run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        Instruction::ResolveStalePermissionless { now_slot: 9001 },
         &mut [&mut market],
     )
     .unwrap();
@@ -16609,7 +16609,7 @@ fn v16_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
     );
     run_ix(
         Instruction::ConfigurePermissionlessResolve {
-            stale_slots: 4,
+            stale_slots: 9000,
             force_close_delay_slots: 1,
         },
         &mut [&mut admin, &mut market],
@@ -16628,8 +16628,8 @@ fn v16_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
         let (mut cfg, mut group) = state::read_market(&market.data).unwrap();
         cfg.last_good_oracle_slot = 1;
         cfg.oracle_target_publish_time = 100;
-        group.current_slot = 5;
-        group.slot_last = 5;
+        group.current_slot = 9001;
+        group.slot_last = 9001;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
 
@@ -16675,7 +16675,7 @@ fn v16_wrapper_hybrid_hard_stale_blocks_live_value_movement_until_resolved() {
     assert_eq!(long_account.data, before_long);
 
     run_ix(
-        Instruction::ResolveStalePermissionless { now_slot: 5 },
+        Instruction::ResolveStalePermissionless { now_slot: 9001 },
         &mut [&mut market],
     )
     .unwrap();
@@ -20848,3 +20848,72 @@ fn v16_wrapper_insurance_withdraw_policy_requires_marketauth() {
 // than the policy — without the control it would have looked like proof the gate fires.
 //
 // The proof lives in `tests/v16_cu.rs`, which runs LiteSVM with a real clock.
+
+// ════════════════════════════════════════════════════════════════════════════
+// #410 — `ConfigurePermissionlessResolve` had no lower bound above zero.
+//
+// The old validation rejected only `stale_slots == 0`, so `1` was accepted. At that
+// setting the permissionless-resolve valve fires on a SINGLE missed oracle refresh
+// instead of a dead feed, and resolution is one-way. The README describes this timer as
+// the user-exit path for when an oracle STOPS WORKING.
+//
+// Upstream carries the identical missing bound, so there was nothing to port.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn v16_wrapper_permissionless_resolve_stale_slots_has_a_lower_bound() {
+    let min = percolator_prog::constants::MIN_PERMISSIONLESS_RESOLVE_STALE_SLOTS;
+    let max = percolator_prog::constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS;
+
+    // The hair trigger the issue reports, and the value just under the floor.
+    for bad in [1u64, 2, min - 1] {
+        let mut admin = signer();
+        let mut market = market_account();
+        let _mint = init_market(&mut admin, &mut market);
+        let r = run_ix(
+            Instruction::ConfigurePermissionlessResolve {
+                stale_slots: bad,
+                force_close_delay_slots: 1,
+            },
+            &mut [&mut admin, &mut market],
+        );
+        assert!(
+            r.is_err(),
+            "#410 — stale_slots={bad} was accepted; a single missed oracle refresh can then \
+             permanently resolve the market, and resolution is one-way"
+        );
+        let (cfg, _) = state::read_market(&market.data).unwrap();
+        assert_eq!(cfg.permissionless_resolve_stale_slots, 0, "state must be unchanged");
+    }
+
+    // PROOF OF LIFE: both boundaries are inclusive and the instruction still works. Without
+    // this the rejections above would also pass if the handler simply refused everything.
+    for good in [min, min + 1, max] {
+        let mut admin = signer();
+        let mut market = market_account();
+        let _mint = init_market(&mut admin, &mut market);
+        run_ix(
+            Instruction::ConfigurePermissionlessResolve {
+                stale_slots: good,
+                force_close_delay_slots: 1,
+            },
+            &mut [&mut admin, &mut market],
+        )
+        .unwrap_or_else(|e| panic!("stale_slots={good} must be accepted: {e:?}"));
+        let (cfg, _) = state::read_market(&market.data).unwrap();
+        assert_eq!(cfg.permissionless_resolve_stale_slots, good);
+    }
+
+    // The upper bound still holds — widening the floor must not have widened the ceiling.
+    let mut admin = signer();
+    let mut market = market_account();
+    let _mint = init_market(&mut admin, &mut market);
+    let over = run_ix(
+        Instruction::ConfigurePermissionlessResolve {
+            stale_slots: max + 1,
+            force_close_delay_slots: 1,
+        },
+        &mut [&mut admin, &mut market],
+    );
+    assert!(over.is_err(), "stale_slots above MAX must still be rejected");
+}

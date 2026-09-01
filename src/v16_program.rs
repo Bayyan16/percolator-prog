@@ -89,6 +89,21 @@ pub mod constants {
     pub const DEFAULT_MARK_EWMA_HALFLIFE_SLOTS: u64 = 600;
     pub const MAX_DYNAMIC_TRADE_FEE_BPS: u64 = 10_000;
     pub const MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 6_480_000;
+    /// Lower bound for `permissionless_resolve_stale_slots` (#410). ~1 hour at 2.5 slots/s.
+    ///
+    /// The old validation rejected only `== 0`, so `1` was accepted: a SINGLE missed oracle
+    /// refresh could permanently resolve a market, and resolution is one-way. The README
+    /// describes this timer as the user-exit path for when an oracle STOPS WORKING — a dead
+    /// feed, not a late one.
+    ///
+    /// An hour must exceed any plausible TRANSIENT (keeper restart, RPC lag, a missed crank)
+    /// while still letting a genuinely abandoned market be resolved the same day. There is no
+    /// cadence parameter to anchor to: `hybrid_soft_stale_slots` is per-asset while this is
+    /// market-level, so a relative bound is not available here.
+    ///
+    /// Upstream has the identical missing bound — nothing to port, no stricter reference to
+    /// defer to. This diverges deliberately.
+    pub const MIN_PERMISSIONLESS_RESOLVE_STALE_SLOTS: u64 = 9_000;
     pub const MAX_FORCE_CLOSE_DELAY_SLOTS: u64 = 10_000_000;
     pub const MIN_INSURANCE_WITHDRAW_FLOOR_UNITS: u128 = 10;
     /// Fork B-11 upper bound on per-asset `max_staleness_secs`. v16 baseline
@@ -13720,7 +13735,7 @@ pub mod processor {
         expect_signer(admin)?;
         expect_writable(market_ai)?;
         expect_owner(market_ai, program_id)?;
-        if stale_slots == 0
+        if stale_slots < constants::MIN_PERMISSIONLESS_RESOLVE_STALE_SLOTS
             || stale_slots > constants::MAX_PERMISSIONLESS_RESOLVE_STALE_SLOTS
             || force_close_delay_slots == 0
             || force_close_delay_slots > constants::MAX_FORCE_CLOSE_DELAY_SLOTS
