@@ -214,6 +214,14 @@ pub mod constants {
     /// (`setup_vault(0)` throughout tests/v16_fork_lp_vault_redeem.rs). The bug in
     /// #440 is unbounded ABOVE; that is what is bounded.
     pub const MAX_LP_REDEMPTION_COOLDOWN_SLOTS: u64 = 78_840_000;
+    /// Upper bound for `insurance_withdraw_cooldown_slots` (#427). Same magnitude and
+    /// same reason as `MAX_LP_REDEMPTION_COOLDOWN_SLOTS`: ~1 year at 2.5 slots/s.
+    ///
+    /// A setter for a cooldown MUST carry a cap. Adding `UpdateInsuranceWithdrawPolicy`
+    /// without one would have closed #427 by opening #440's exact shape — an admin
+    /// setting `u64::MAX` and freezing insurance withdrawals forever. The point of the
+    /// fix is that the policy becomes REACHABLE, not that it becomes unbounded.
+    pub const MAX_INSURANCE_WITHDRAW_COOLDOWN_SLOTS: u64 = 78_840_000;
 
     /// LP Vault instruction tags (v17 renumbered from 65-71 → 74-80 to avoid
     /// collision with toly's UpdateAssetAuthority(65)/BatchTradeNoCpi(66)/
@@ -4022,6 +4030,17 @@ pub mod ix {
         UpdateFeeRedirectPolicy {
             redirect_bps: u16,
         },
+        /// #427 — make the insurance-withdrawal rate limit SETTABLE.
+        ///
+        /// `insurance_withdraw_deposits_only` and `insurance_withdraw_cooldown_slots`
+        /// were written in exactly one place each — `: 0,` in the `handle_init_market`
+        /// config literal — and both enforcement helpers short-circuit on zero. The
+        /// checks added by #385/#386/#396 therefore could not execute in any market
+        /// ever created. This instruction is the missing writer.
+        UpdateInsuranceWithdrawPolicy {
+            deposits_only: u8,
+            cooldown_slots: u64,
+        },
         UpdateMarketInitFeePolicy {
             min_init_fee: u128,
         },
@@ -4478,6 +4497,10 @@ pub mod ix {
                 58 => Self::UpdateFeeRedirectPolicy {
                     redirect_bps: read_u16(&mut rest)?,
                 },
+                92 => Self::UpdateInsuranceWithdrawPolicy {
+                    deposits_only: read_u8(&mut rest)?,
+                    cooldown_slots: read_u64(&mut rest)?,
+                },
                 59 => Self::UpdateMarketInitFeePolicy {
                     min_init_fee: read_u128(&mut rest)?,
                 },
@@ -4894,6 +4917,14 @@ pub mod ix {
                 Self::UpdateFeeRedirectPolicy { redirect_bps } => {
                     out.push(58);
                     push_u16(&mut out, redirect_bps);
+                }
+                Self::UpdateInsuranceWithdrawPolicy {
+                    deposits_only,
+                    cooldown_slots,
+                } => {
+                    out.push(92);
+                    out.push(deposits_only);
+                    push_u64(&mut out, cooldown_slots);
                 }
                 Self::UpdateMarketInitFeePolicy { min_init_fee } => {
                     out.push(59);
@@ -7396,6 +7427,15 @@ pub mod processor {
             Instruction::UpdateMarketInitFeePolicy { min_init_fee } => {
                 handle_update_market_init_fee_policy(program_id, accounts, min_init_fee)
             }
+            Instruction::UpdateInsuranceWithdrawPolicy {
+                deposits_only,
+                cooldown_slots,
+            } => handle_update_insurance_withdraw_policy(
+                program_id,
+                accounts,
+                deposits_only,
+                cooldown_slots,
+            ),
             Instruction::WithdrawBackingBucketEarnings { domain, amount } => {
                 handle_withdraw_backing_bucket_earnings(program_id, accounts, domain, amount)
             }
@@ -13598,6 +13638,42 @@ pub mod processor {
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
         expect_live_authority(&cfg.marketauth, admin.key)?;
         cfg.permissionless_market_init_fee = min_init_fee;
+        state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
+    }
+
+    /// #427 — the missing writer for the insurance-withdrawal rate limit.
+    ///
+    /// `check_insurance_withdraw_cooldown` and `apply_insurance_withdraw_ceiling` are
+    /// both correct and both no-ops while their policy fields are zero, and zero is the
+    /// only value `handle_init_market` ever wrote. So #385, #386 and #396 were closed by
+    /// adding enforcement that no deployed market could reach. Upstream carries the same
+    /// two fields with the same single `: 0,` write and no setter either, so there is no
+    /// upstream implementation to port — this diverges deliberately.
+    ///
+    /// `deposits_only` is a flag (any non-zero arms the deposits-only ceiling), so it
+    /// needs no bound. `cooldown_slots` is a duration and therefore does — see
+    /// `MAX_INSURANCE_WITHDRAW_COOLDOWN_SLOTS`. Zero remains legal for both: it is how a
+    /// market turns the limit back OFF, and refusing it would make the policy one-way.
+    #[inline(never)]
+    fn handle_update_insurance_withdraw_policy<'a>(
+        program_id: &Pubkey,
+        accounts: &'a [AccountInfo<'a>],
+        deposits_only: u8,
+        cooldown_slots: u64,
+    ) -> ProgramResult {
+        let admin = account(accounts, 0)?;
+        let market_ai = account(accounts, 1)?;
+        expect_signer(admin)?;
+        expect_writable(market_ai)?;
+        expect_owner(market_ai, program_id)?;
+        if cooldown_slots > constants::MAX_INSURANCE_WITHDRAW_COOLDOWN_SLOTS {
+            return Err(PercolatorError::InvalidInstruction.into());
+        }
+        let (mut cfg, _, _, _) =
+            state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
+        expect_live_authority(&cfg.marketauth, admin.key)?;
+        cfg.insurance_withdraw_deposits_only = deposits_only;
+        cfg.insurance_withdraw_cooldown_slots = cooldown_slots;
         state::write_wrapper_config(&mut market_ai.try_borrow_mut_data()?, &cfg)
     }
 

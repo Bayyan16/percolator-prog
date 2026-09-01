@@ -11615,3 +11615,132 @@ fn v16_bpf_batch_trade_cpi_fanout_budget_characterisation() {
     // broken harness rather than the program.
     assert!(run(2, 1).is_ok(), "the 2x1 corner must execute");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// #427 REACHABILITY PROOF — lives here, not in v16_wrapper.rs.
+//
+// `handle_withdraw_insurance_asset` calls `Clock::get()` for the cooldown check, and
+// the v16_wrapper harness has no Clock sysvar (that whole withdrawal family is in
+// KNOWN_FAILING for exactly this reason). LiteSVM has a real clock, so the gate can
+// actually be observed firing here.
+//
+// The settability, bound and authority tests live in v16_wrapper.rs. What THESE prove
+// is the only thing that made #427 a defect rather than a missing feature: before the
+// fix the cooldown was structurally pinned at zero, so the F-1 gate added by
+// #385/#386/#396 could not execute in any market that had ever been created.
+// ════════════════════════════════════════════════════════════════════════════
+
+fn withdraw_insurance_asset_result(env: &mut V16CuEnv, amount: u128) -> Result<u64, String> {
+    let dest = Pubkey::new_unique();
+    let mint = env.mint;
+    let admin_pk = env.admin.pubkey();
+    env.svm
+        .set_account(
+            dest,
+            Account {
+                lamports: 1_000_000_000,
+                data: make_token_data(mint, admin_pk, 0),
+                owner: spl_token::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let pid = env.program_id;
+    let payer = env.payer.insecure_clone();
+    let admin = env.admin.insecure_clone();
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    send_tx(
+        &mut env.svm,
+        pid,
+        &payer,
+        ProgInstruction::WithdrawInsuranceAsset { asset_index: 0, amount },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+        ],
+        &[&admin],
+    )
+}
+
+#[test]
+fn v16_bpf_insurance_withdraw_cooldown_now_actually_fires() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000);
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 500);
+
+    // The instruction that did not exist before #427.
+    send_tx(
+        &mut env.svm,
+        env.program_id,
+        &env.payer.insecure_clone(),
+        ProgInstruction::UpdateInsuranceWithdrawPolicy { deposits_only: 0, cooldown_slots: 1_000 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(env.market, false),
+        ],
+        &[&admin],
+    )
+    .expect("#427: the withdrawal policy must be settable");
+
+    // MUST run at a non-zero slot. `check_insurance_withdraw_cooldown` skips the gate when
+    // `last_slot == 0`, and it uses 0 as the "never withdrawn" sentinel — so at LiteSVM's
+    // starting slot the first withdrawal records 0, which reads as "no previous withdrawal"
+    // and hands out a free second one. Slot 0 is unreachable on a real cluster, so this is a
+    // harness artifact rather than a defect, but it is exactly the kind of artifact that
+    // makes a gate look broken when it is not.
+    env.svm.warp_to_slot(100);
+    let first = withdraw_insurance_asset_result(&mut env, 10);
+    let second = withdraw_insurance_asset_result(&mut env, 10);
+    // And it must be a COOLDOWN, not a permanent block: past the window it opens again.
+    env.svm.warp_to_slot(100 + 1_000 + 1);
+    let after_window = withdraw_insurance_asset_result(&mut env, 10);
+    println!("    [#427] first        -> {first:?}");
+    println!("    [#427] second       -> {second:?}");
+    println!("    [#427] after window -> {after_window:?}");
+
+    assert!(first.is_ok(), "first withdrawal is always allowed by design: {first:?}");
+    assert!(
+        after_window.is_ok(),
+        "the gate must EXPIRE — a cooldown that never lifts is a freeze, not a rate limit: \
+         {after_window:?}"
+    );
+    assert!(
+        second.is_err(),
+        "#427 REGRESSION — a second withdrawal inside the cooldown window was ACCEPTED. \
+         The F-1 gate added by #385/#386/#396 is unreachable again, which is the whole defect."
+    );
+}
+
+/// CONTROL. With the cooldown left at its default zero — the state EVERY market was
+/// stuck in before #427 — the second withdrawal must SUCCEED. Without this, the
+/// rejection above could be any other rule and would be evidence for the wrong claim.
+/// A first draft of this pair lived in v16_wrapper.rs where BOTH failed on
+/// `UnsupportedSysvar`; only the control revealed the harness was at fault.
+#[test]
+fn control_second_insurance_withdrawal_succeeds_with_no_cooldown_configured() {
+    let mut env = V16CuEnv::new();
+    env.top_up_insurance(1_000);
+    let admin = env.admin.insecure_clone();
+    env.top_up_insurance_domain_with_authority_and_cu(&admin, 0, 500);
+    // Deliberately NO UpdateInsuranceWithdrawPolicy — this is the pre-#427 world.
+
+    env.svm.warp_to_slot(100);
+    let first = withdraw_insurance_asset_result(&mut env, 10);
+    let second = withdraw_insurance_asset_result(&mut env, 10);
+    println!("    [#427-control] first  -> {first:?}");
+    println!("    [#427-control] second -> {second:?}");
+    assert!(first.is_ok(), "control first withdrawal: {first:?}");
+    assert!(
+        second.is_ok(),
+        "CONTROL BROKEN — the second withdrawal failed with no cooldown set, so the \
+         rejection in the test above cannot be attributed to the policy: {second:?}"
+    );
+}

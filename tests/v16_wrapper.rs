@@ -20747,3 +20747,104 @@ fn v16_wrapper_asset_admin_cannot_seize_insurance_operator_from_holder() {
     );
     assert_err_and_market_unchanged(seized, &market, &held);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// #427 — the insurance-withdrawal rate limit was STRUCTURALLY UNSETTABLE.
+//
+// `check_insurance_withdraw_cooldown` and `apply_insurance_withdraw_ceiling` are
+// correct and are directly unit-tested above. That was never the problem. The
+// problem was that both short-circuit on zero, and zero was the ONLY value any
+// market could ever hold: the two policy fields were written in exactly one place
+// each — `: 0,` in the `handle_init_market` config literal. So #385, #386 and #396
+// were closed by adding enforcement that no deployed market could reach.
+//
+// These tests are about REACHABILITY, not about the helpers' arithmetic. A green
+// unit test on a function nothing can invoke is the exact shape of vacuity this
+// repo keeps finding.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The core #427 proof: the policy can now hold a non-zero value at all.
+#[test]
+fn v16_wrapper_insurance_withdraw_policy_is_settable() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let _mint = init_market(&mut admin, &mut market);
+
+    let (before, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(before.insurance_withdraw_cooldown_slots, 0, "init writes zero");
+    assert_eq!(before.insurance_withdraw_deposits_only, 0, "init writes zero");
+
+    run_ix(
+        Instruction::UpdateInsuranceWithdrawPolicy { deposits_only: 1, cooldown_slots: 100 },
+        &mut [&mut admin, &mut market],
+    )
+    .expect("#427: marketauth must be able to set the insurance-withdrawal policy");
+
+    let (after, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(after.insurance_withdraw_cooldown_slots, 100);
+    assert_eq!(after.insurance_withdraw_deposits_only, 1);
+
+    // Zero must stay legal — it is how a market turns the limit back OFF. Refusing it
+    // would make the policy one-way, which is a different defect in the same family.
+    run_ix(
+        Instruction::UpdateInsuranceWithdrawPolicy { deposits_only: 0, cooldown_slots: 0 },
+        &mut [&mut admin, &mut market],
+    )
+    .expect("clearing the policy must remain possible");
+    let (cleared, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cleared.insurance_withdraw_cooldown_slots, 0);
+}
+
+/// A setter for a DURATION must carry a cap, or closing #427 just opens #440's shape.
+#[test]
+fn v16_wrapper_insurance_withdraw_cooldown_is_bounded() {
+    let mut admin = signer();
+    let mut market = market_account();
+    let _mint = init_market(&mut admin, &mut market);
+
+    let max = percolator_prog::constants::MAX_INSURANCE_WITHDRAW_COOLDOWN_SLOTS;
+    run_ix(
+        Instruction::UpdateInsuranceWithdrawPolicy { deposits_only: 0, cooldown_slots: max },
+        &mut [&mut admin, &mut market],
+    )
+    .expect("the cap itself must be accepted (boundary inclusive)");
+
+    let over = run_ix(
+        Instruction::UpdateInsuranceWithdrawPolicy { deposits_only: 0, cooldown_slots: max + 1 },
+        &mut [&mut admin, &mut market],
+    );
+    assert!(over.is_err(), "cooldown above the cap must be rejected");
+
+    let forever = run_ix(
+        Instruction::UpdateInsuranceWithdrawPolicy { deposits_only: 0, cooldown_slots: u64::MAX },
+        &mut [&mut admin, &mut market],
+    );
+    assert!(forever.is_err(), "u64::MAX would freeze insurance withdrawals permanently");
+}
+
+#[test]
+fn v16_wrapper_insurance_withdraw_policy_requires_marketauth() {
+    let mut admin = signer();
+    let mut attacker = signer();
+    let mut market = market_account();
+    let _mint = init_market(&mut admin, &mut market);
+
+    let seized = run_ix(
+        Instruction::UpdateInsuranceWithdrawPolicy { deposits_only: 1, cooldown_slots: 10 },
+        &mut [&mut attacker, &mut market],
+    );
+    assert!(seized.is_err(), "a non-marketauth signer must not set the withdrawal policy");
+    let (cfg, _) = state::read_market(&market.data).unwrap();
+    assert_eq!(cfg.insurance_withdraw_cooldown_slots, 0, "state must be unchanged");
+}
+
+// REACHABILITY PROOF: NOT HERE. `handle_withdraw_insurance` /
+// `handle_withdraw_insurance_asset` call `Clock::get()` for the cooldown check, and this
+// harness has no Clock sysvar — every withdrawal returns `UnsupportedSysvar`, which is why
+// the whole `v16_wrapper_*insurance*withdraw*` family already sits in KNOWN_FAILING.
+//
+// A first draft of the end-to-end test lived here and "failed" for that reason. Its CONTROL
+// failed identically, which is the only thing that revealed the harness was the cause rather
+// than the policy — without the control it would have looked like proof the gate fires.
+//
+// The proof lives in `tests/v16_cu.rs`, which runs LiteSVM with a real clock.
