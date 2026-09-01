@@ -2243,3 +2243,158 @@ fn request_redeem_succeeds_with_prefunded_escrow_and_redemption() {
         "redemption PDA must be initialized"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// #419 — a dual-domain LP has NO BOUNDED EXIT on a resolved market.
+//
+// The redemption is priced across the COMBINED pots of the vault's asset but
+// executed against ONE of them:
+//
+//   available_principal = lp_vault_combined_available_principal_atoms(...)   :15627
+//   principal_out       = floor(shares * available_principal / total_shares) :15650
+//   ...
+//   if principal_portion > ledger.total_principal_atoms { EngineCounterUnderflow }  :15767
+//
+// So once an LP's proportional share exceeds EITHER single pot, both choices of
+// `source_domain` fail. The only way to consolidate the pots is
+// RebalanceLpVaultBacking, and that is gated `Live`-only (:15309), while
+// redemption itself is explicitly allowed in Resolved (:15585).
+//
+// Resolve such a market and the capital is stranded: no domain can pay, and the
+// instruction that would fix it is refused.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// ExecuteRedemption drawing from a chosen pot.
+///
+/// The account list does NOT change with `domain`. `handle_execute_redemption`
+/// (`:15559`) selects the source ledger ITSELF from fixed slots — account 8 is always
+/// the registry's OWN domain ledger, account 11 always the sibling — and picks between
+/// them with `source_domain == registry.domain`. An earlier version of this helper
+/// "corrected" the list by swapping the two whenever the sibling was requested; the
+/// handler then swapped again, and the call died with `InvalidArgument` before ever
+/// reaching the guard under test. That would have made the deadlock test go red for a
+/// harness bug rather than the defect, which is the same failure class the defect is.
+fn exec_draw_from(env: &mut Env, d: &Depositor, domain: u16) -> Result<(), String> {
+    let pid = env.program_id;
+    let payer = env.payer.insecure_clone();
+    let accts = execute_accounts(env, d);
+    send(&mut env.svm, pid, &payer, vec![(ProgInstruction::ExecuteRedemption { domain }, accts)], &[])
+}
+
+fn try_rebalance_backing(env: &mut Env, from_domain: u16, to_domain: u16, amount: u128) -> Result<(), String> {
+    let pid = env.program_id;
+    let payer = env.payer.insecure_clone();
+    let from_ledger = derive_lp_backing_ledger(&env.program_id, &env.market, from_domain).0;
+    let to_ledger = derive_lp_backing_ledger(&env.program_id, &env.market, to_domain).0;
+    let accts = vec![
+        AccountMeta::new(env.payer.pubkey(), true),
+        AccountMeta::new(env.market, false),
+        AccountMeta::new(env.registry, false),
+        AccountMeta::new(from_ledger, false),
+        AccountMeta::new(to_ledger, false),
+        AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+    ];
+    send(
+        &mut env.svm,
+        pid,
+        &payer,
+        vec![(ProgInstruction::RebalanceLpVaultBacking { from_domain, to_domain, amount }, accts)],
+        &[],
+    )
+}
+
+/// CONTROL. The same flow with principal in ONE pot must redeem fine on a resolved
+/// market. Without this, the deadlock test below could go red because resolution
+/// blocks redemption in general — which it does NOT (`:15585` allows Resolved) —
+/// and would be evidence for the wrong claim.
+#[test]
+fn control_single_domain_lp_can_still_exit_a_resolved_market() {
+    let mut env = setup_vault(0);
+    let d = new_depositor(&mut env, DEPOSIT);
+    resolve_market(&mut env).expect("resolve");
+    request(&mut env, &d, MINTED).expect("request");
+    env.svm.expire_blockhash();
+    let before = tok(&env.svm, d.dest);
+    exec_draw_from(&mut env, &d, DOMAIN)
+        .expect("single-domain redemption must succeed when resolved");
+    let after = tok(&env.svm, d.dest);
+    assert!(after > before, "control paid nothing: {before} -> {after}");
+}
+
+#[test]
+fn issue_419_dual_domain_lp_can_exit_a_resolved_market_via_rebalance() {
+    let mut env = setup_vault(0);
+    // Sole LP. DEPOSIT atoms of principal land in DOMAIN; the depositor holds MINTED
+    // shares (LP_VAULT_MINIMUM_LIQUIDITY is the dead-share carve-out), so their
+    // proportional claim is very nearly the WHOLE combined principal.
+    let d = new_depositor(&mut env, DEPOSIT);
+
+    // PROOF OF LIFE: the split must be a legitimate, reachable state, or the deadlock
+    // this test guards against would be unreachable and a green result would mean nothing.
+    try_rebalance_backing(&mut env, DOMAIN, DOMAIN ^ 1, DEPOSIT / 2)
+        .expect("PROOF OF LIFE: rebalancing idle backing while Live must succeed");
+
+    resolve_market(&mut env).expect("resolve");
+    request(&mut env, &d, MINTED).expect("request");
+    env.svm.expire_blockhash();
+
+    // THE DEFECT: with DEPOSIT/2 in each pot and one LP entitled to ~all of it, the
+    // proportional claim exceeds EITHER pot, so both draws fail. This half is expected
+    // and is NOT the bug — the bug was that it had no remedy.
+    let from_home = exec_draw_from(&mut env, &d, DOMAIN);
+    env.svm.expire_blockhash();
+    let from_sibling = exec_draw_from(&mut env, &d, DOMAIN ^ 1);
+    env.svm.expire_blockhash();
+    println!("    [#419] draw from DOMAIN  -> {from_home:?}");
+    println!("    [#419] draw from SIBLING -> {from_sibling:?}");
+
+    // THE FIX: consolidating the pots is a bounded, permissionless continuation, and it
+    // must be available in Resolved — the mode in which an LP most needs to get out.
+    try_rebalance_backing(&mut env, DOMAIN ^ 1, DOMAIN, DEPOSIT / 2).expect(
+        "#419 REGRESSION — RebalanceLpVaultBacking refused on a RESOLVED market. That is \
+         the deadlock: redemption is priced on COMBINED principal but drawn from a SINGLE \
+         pot, so once an LP's claim exceeds either pot, consolidating is the ONLY remedy. \
+         Refusing it here strands the capital permanently.",
+    );
+    env.svm.expire_blockhash();
+
+    // AND THE EXIT MUST ACTUALLY PAY. An open instruction is not an exit; the DoS is only
+    // closed when the LP's tokens move.
+    let before = tok(&env.svm, d.dest);
+    exec_draw_from(&mut env, &d, DOMAIN)
+        .expect("#419 REGRESSION — redemption still fails after consolidating the pots");
+    let paid = tok(&env.svm, d.dest) - before;
+    println!("    [#419] atoms paid after consolidation -> {paid}");
+
+    assert!(paid > 0, "#419 REGRESSION — redemption reported success but paid nothing");
+    assert_eq!(
+        paid, MINTED as u64,
+        "the LP must be paid its full pro-rata claim once the pots are consolidated"
+    );
+}
+
+/// The #419 fix widened the rebalance mode gate. The SAFETY gates must not have
+/// widened with it. `v17_lp_vault_dual_domain` covers over-moving, liened backing and
+/// cross-asset moves, but every one of those runs against a LIVE market — so they say
+/// nothing about the mode this fix newly admits. Assuming they carry over is exactly
+/// the assumption worth testing.
+#[test]
+fn rebalance_in_resolved_still_refuses_to_move_more_than_is_there() {
+    let mut env = setup_vault(0);
+    let _d = new_depositor(&mut env, DEPOSIT);
+    resolve_market(&mut env).expect("resolve");
+
+    // PROOF OF LIFE: a legal move of the same shape must succeed here, or the rejection
+    // below would just be "rebalance is refused in Resolved" — the very thing we fixed.
+    try_rebalance_backing(&mut env, DOMAIN, DOMAIN ^ 1, DEPOSIT / 4)
+        .expect("PROOF OF LIFE: a legal rebalance must succeed on a resolved market");
+    env.svm.expire_blockhash();
+
+    let over = try_rebalance_backing(&mut env, DOMAIN, DOMAIN ^ 1, DEPOSIT * 10);
+    println!("    [#419-safety] over-move on a resolved market -> {over:?}");
+    assert!(
+        over.is_err(),
+        "widening the mode gate must not have widened the amount gate: moving more \
+         backing than the source pot holds was accepted on a resolved market"
+    );
+}

@@ -15304,7 +15304,29 @@ pub mod processor {
 
         let (cfg, mode, configured_slots, _) =
             state::read_market_config_mode_and_capacity(&market_ai.try_borrow_data()?)?;
-        if mode != MarketModeV16::Live {
+        // Live OR Resolved — deliberately the SAME gate ExecuteRedemption uses
+        // (`:15583`), because this instruction exists to make redemption feasible.
+        //
+        // #419: redemption prices an LP's payout across the COMBINED pots
+        // (`lp_vault_combined_available_principal_atoms`) but draws it from ONE
+        // (`principal_portion > ledger.total_principal_atoms` -> EngineCounterUnderflow).
+        // Once an LP's proportional claim exceeds either single pot, BOTH choices of
+        // `source_domain` fail, and consolidating the pots is the only remedy. With
+        // this gate at `Live` only, resolving such a market stranded the LP's capital
+        // permanently: no domain could pay, and the one instruction that would fix it
+        // was refused. Reproduced end-to-end: both draws Custom(25), rebalance
+        // Custom(21), LP paid 0.
+        //
+        // Safe in Resolved for the same reasons it is permissionless in Live, none of
+        // which reference the mode: NO TOKENS MOVE (`header.vault` is untouched and the
+        // `source_fresh_backing_total_num` aggregate nets to zero), both pots belong to
+        // the SAME vault so no value can be extracted, only FRESH UNLIENED backing is
+        // movable, and the source-side watermark gate below still refuses any move that
+        // would leave the source domain under-backed. Resolved is if anything the safer
+        // mode, since there is no live OI for the moved backing to be supporting.
+        //
+        // Terminal modes other than Resolved stay barred.
+        if mode != MarketModeV16::Live && mode != MarketModeV16::Resolved {
             return Err(PercolatorError::EngineLockActive.into());
         }
         if from_domain as usize >= configured_slots.saturating_mul(2)
@@ -15351,10 +15373,20 @@ pub mod processor {
 
         let mut market_data = market_ai.try_borrow_mut_data()?;
         let (cfg_v, mut group) = state::market_view_mut(&mut market_data)?;
-        if group.header.mode != 0 {
+        // The ENGINE-side twin of the mode gate above, and it must agree with it.
+        // 0 = Live, 1 = Resolved (`MarketModeV16::Resolved => 1`). #419: this one
+        // carried no comment and was the gate that actually kept firing after the
+        // header gate was relaxed — the LP still saw Custom(21). Both have to move
+        // together or the fix is invisible.
+        if group.header.mode != 0 && group.header.mode != 1 {
             return Err(PercolatorError::EngineLockActive.into());
         }
-        reject_permissionless_resolve_matured_live_view(&cfg_v, &group)?;
+        // Live-only by construction: it rejects a LIVE market that has already matured
+        // past its permissionless-resolve deadline. A Resolved market is the state that
+        // check exists to force, so applying it there would bar the very mode it wants.
+        if group.header.mode == 0 {
+            reject_permissionless_resolve_matured_live_view(&cfg_v, &group)?;
+        }
 
         // ── Source side: withdraw idle backing. Mirrors the withdrawability gate
         //    in percolator::v16::prepare_counterparty_backing_withdraw_delta plus
