@@ -10218,6 +10218,37 @@ pub mod processor {
     /// existing holders' expense. Summing the two `lp_vault_nav_atoms` calls
     /// separately loses at most 1 atom to the `lp_earnings` floor versus summing
     /// the inputs first — that atom stays in the vault, which is the safe side.
+    /// Atoms the LP-vault fee crank could harvest into NAV *right now* (#411).
+    ///
+    /// This is the SINGLE definition of that quantity. `handle_lp_vault_crank_fees` and
+    /// `handle_deposit_to_lp_vault` both call it, deliberately: the deposit must be priced
+    /// against exactly what a crank in the same slot would realize, and if the two ever
+    /// computed it separately they would drift and reopen this bug.
+    ///
+    /// It is NOT `lp_fee_accrued - lp_fee_withdrawn`. That is the CLAIM, and three legs
+    /// (protocol / LP / stake) share one surplus pool with no cross-leg accounting, so the
+    /// claim is only realizable down to whatever the engine and the vault can actually
+    /// cover. Pricing against the unclamped claim would overstate NAV whenever the surplus
+    /// is dry — trading one mispricing for another, in the opposite direction.
+    fn lp_vault_harvestable_fee_atoms(
+        cfg: &state::WrapperConfigV16,
+        group: &state::MarketViewMutV16<'_>,
+    ) -> Result<u128, ProgramError> {
+        let claim_capacity = cfg
+            .lp_fee_accrued_atoms
+            .checked_sub(cfg.lp_fee_withdrawn_atoms)
+            .ok_or(PercolatorError::EngineCounterUnderflow)?;
+        let engine_available = group
+            .header
+            .insurance
+            .get()
+            .saturating_sub(group.header.source_insurance_credit_reserved_total_atoms.get())
+            .saturating_sub(group.header.insurance_domain_budget_remaining_total.get());
+        Ok(claim_capacity
+            .min(engine_available)
+            .min(group.header.vault.get()))
+    }
+
     fn lp_vault_combined_nav_atoms(
         group: &state::MarketViewMutV16<'_>,
         market_group: [u8; 32],
@@ -15035,7 +15066,7 @@ pub mod processor {
         // ── Phase 1: NAV (pre-deposit) + shares computation, no mutation. ──
         let shares = {
             let mut market_data = market_ai.try_borrow_mut_data()?;
-            let (_, group) = state::market_view_mut(&mut market_data)?;
+            let (cfg_v, group) = state::market_view_mut(&mut market_data)?;
             let (_, bucket) = backing_domain_parts_view(&group, domain)?;
             let ledger_data = ledger_ai.try_borrow_data()?;
             let sibling_ledger_data = sibling_ledger_ai.try_borrow_data()?;
@@ -15048,6 +15079,24 @@ pub mod processor {
                 &ledger_data,
                 &sibling_ledger_data,
             )?;
+            // #411: NAV above is derived ENTIRELY from the backing-domain ledgers, so it
+            // does not see the vault's own accrued fee pool. Those fees belong to the LPs
+            // who were carrying the vault while they were earned, but they only enter NAV
+            // when someone calls the permissionless `LpVaultCrankFees` — which takes any
+            // signer, is paid nothing, and can therefore run at an arbitrary time.
+            //
+            // Pricing without them let a deposit landing just before a crank buy into fees
+            // it did not earn: the newcomer's shares were minted against the pre-harvest
+            // NAV and revalued upward moments later at the existing LPs' expense. The same
+            // vector was already fixed in percolator-stake.
+            //
+            // Adding the HARVESTABLE amount (not the raw claim — see the helper) makes the
+            // quote independent of crank timing, which is the actual property that was
+            // missing. No tokens move here; this only affects the share count.
+            let harvestable = lp_vault_harvestable_fee_atoms(&cfg_v, &group)?;
+            let nav = nav
+                .checked_add(harvestable)
+                .ok_or(PercolatorError::EngineArithmeticOverflow)?;
             percolator::lp_vault::lp_shares_for_deposit(
                 amount,
                 registry.total_lp_shares_outstanding,
@@ -16567,28 +16616,14 @@ pub mod processor {
             // lp_fee_withdrawn_atoms <= lp_fee_accrued_atoms, always — so the
             // subtraction can only underflow on a corrupt config, which fails
             // closed.
-            let claim_capacity = cfg
-                .lp_fee_accrued_atoms
-                .checked_sub(cfg.lp_fee_withdrawn_atoms)
-                .ok_or(PercolatorError::EngineCounterUnderflow)?;
-            // MANDATORY CLAMP — mirrors `handle_withdraw_protocol_fee`'s
-            // `§1.3/N2 clamp` verbatim.
-            // Three legs (protocol / LP / stake) share this one surplus
-            // pool with no cross-leg accounting, so an unclamped claim makes the
-            // last leg to crank fail out of the engine with EngineLockActive.
-            // `.min(vault)` mirrors `protocol_fee_withdraw_amount`'s second bound:
-            // `withdraw_insurance_surplus_delta` rejects `amount > vault` too, and
-            // this call must succeed at the intermediate (V−a) point even though
-            // we restore V immediately after.
-            let engine_available = group
-                .header
-                .insurance
-                .get()
-                .saturating_sub(group.header.source_insurance_credit_reserved_total_atoms.get())
-                .saturating_sub(group.header.insurance_domain_budget_remaining_total.get());
-            let available = claim_capacity
-                .min(engine_available)
-                .min(group.header.vault.get());
+            // #411: computed by `lp_vault_harvestable_fee_atoms`, which
+            // `handle_deposit_to_lp_vault` also calls. Deliberately shared — a deposit must
+            // be priced against exactly what a crank in the same slot would realize, and
+            // two separate copies of this clamp would drift and reopen that bug. The
+            // reasoning that used to live here (three legs share one surplus pool with no
+            // cross-leg accounting, so an unclamped claim makes the last leg to crank fail
+            // out of the engine) now lives on the helper.
+            let available = lp_vault_harvestable_fee_atoms(&cfg, &group)?;
             // Zero case: nothing accrued, or the surplus pool is currently dry
             // (another leg got there first). Same error either way — the claim
             // is NOT marked withdrawn, so it stays fully claimable next crank.

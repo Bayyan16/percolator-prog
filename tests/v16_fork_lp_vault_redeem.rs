@@ -2398,3 +2398,93 @@ fn rebalance_in_resolved_still_refuses_to_move_more_than_is_there() {
          backing than the source pot holds was accepted on a resolved market"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// #411 — a deposit landing before the fee crank bought fees it did not earn.
+//
+// `handle_deposit_to_lp_vault` priced shares off `lp_vault_combined_nav_atoms`, which
+// derives NAV ENTIRELY from the backing-domain ledgers and never reads
+// `cfg.lp_fee_accrued_atoms`. Those fees belong to the LPs who carried the vault while
+// they were earned, but they only enter NAV when someone calls the permissionless
+// `LpVaultCrankFees` — which takes any signer, is paid nothing, and therefore runs at an
+// arbitrary time. A newcomer depositing just before a crank was minted shares against the
+// pre-harvest NAV and revalued upward moments later, at the existing LPs' expense.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// CONTROL. With NO fees accrued, two equal deposits must mint equal shares. This pins that
+/// the difference measured below comes from the fee pool and not from anything else the
+/// second deposit changes (ordering, dead-share carve-out, ledger state).
+#[test]
+fn control_equal_deposits_mint_equal_shares_when_no_fees_are_accrued() {
+    let mut env = setup_vault(0);
+    let _genesis = new_depositor(&mut env, DEPOSIT);
+    let a = new_depositor(&mut env, DEPOSIT);
+    env.svm.expire_blockhash();
+    let b = new_depositor(&mut env, DEPOSIT);
+
+    let sa = tok(&env.svm, a.lp_ata) as u128;
+    let sb = tok(&env.svm, b.lp_ata) as u128;
+    println!("    [#411-control] a={sa} b={sb}");
+    assert_eq!(sa, sb, "with no fee pool, equal deposits must mint equal shares");
+}
+
+#[test]
+fn issue_411_a_late_deposit_cannot_buy_into_previously_earned_fees() {
+    const LP_FEES: u128 = 250_000;
+    let mut env = setup_vault(0);
+    let _genesis = new_depositor(&mut env, DEPOSIT);
+
+    // A deposits while the vault has no accrued fees.
+    let a = new_depositor(&mut env, DEPOSIT);
+    let shares_a = tok(&env.svm, a.lp_ata) as u128;
+
+    // Fees are earned by the LPs now in the vault (A and genesis).
+    seed_lp_fee_accrued(&mut env, LP_FEES);
+    env.svm.expire_blockhash();
+
+    // B deposits the SAME amount, before anyone cranks.
+    let b = new_depositor(&mut env, DEPOSIT);
+    let shares_b = tok(&env.svm, b.lp_ata) as u128;
+
+    println!("    [#411] shares A (pre-fee)  = {shares_a}");
+    println!("    [#411] shares B (post-fee) = {shares_b}");
+
+    assert!(
+        shares_b < shares_a,
+        "#411 REGRESSION — an identical deposit minted {shares_b} shares after {LP_FEES} \
+         atoms of fees had accrued, the same as the {shares_a} minted before. The deposit is \
+         still priced off ledger-derived NAV alone, so B is buying a claim on fees A earned."
+    );
+}
+
+/// The economic statement of the same thing: after the crank actually lands, the late
+/// depositor must not be able to withdraw more than they put in. `shares_b < shares_a` is
+/// the mechanism; this is the consequence, and it is what "loss of funds" means here.
+#[test]
+fn issue_411_late_depositor_cannot_extract_more_than_deposited() {
+    const LP_FEES: u128 = 250_000;
+    let mut env = setup_vault(0);
+    let _genesis = new_depositor(&mut env, DEPOSIT);
+    let _a = new_depositor(&mut env, DEPOSIT);
+    seed_lp_fee_accrued(&mut env, LP_FEES);
+    env.svm.expire_blockhash();
+
+    let b = new_depositor(&mut env, DEPOSIT);
+    env.svm.expire_blockhash();
+    crank_fees_into(&mut env, DOMAIN).expect("crank the accrued fees into NAV");
+    env.svm.expire_blockhash();
+
+    let shares_b = tok(&env.svm, b.lp_ata) as u128;
+    request(&mut env, &b, shares_b).expect("request");
+    env.svm.expire_blockhash();
+    exec_draw_from(&mut env, &b, DOMAIN).expect("execute");
+    let paid = tok(&env.svm, b.dest) as u128;
+
+    println!("    [#411] B deposited {DEPOSIT}, withdrew {paid}");
+    assert!(
+        paid <= DEPOSIT,
+        "#411 REGRESSION — the late depositor withdrew {paid} against a {DEPOSIT} deposit, \
+         extracting {} atoms of fees earned before they arrived",
+        paid.saturating_sub(DEPOSIT)
+    );
+}
