@@ -240,6 +240,26 @@ fn backing_domain_ledger_account() -> TestAccount {
     .writable()
 }
 
+/// The CANONICAL backing-domain ledger for `market`/`domain`, pre-created.
+///
+/// #433: `TopUpBackingBucket` now pins this account to its PDA and `WithdrawBackingBucket`
+/// requires it. `backing_domain_ledger_account()` above returns a RANDOM address, which the
+/// pin correctly refuses — that helper is for substitution tests only.
+///
+/// Pre-created (non-empty data, program-owned) so the handler's `create_pda_account` path is
+/// skipped: this harness executes no CPI, so a genuinely absent ledger could not be created
+/// here even though it can be on chain.
+fn canonical_backing_ledger_account(market: &TestAccount, domain: u16) -> TestAccount {
+    let (key, _) = state::derive_lp_backing_ledger(&program_id(), &market.key, domain);
+    TestAccount::new(key, program_id(), state::backing_domain_ledger_account_len()).writable()
+}
+
+/// System program, passed to `TopUpBackingBucket` so it CAN create the ledger. Never invoked
+/// in this harness, because the ledger above is pre-created.
+fn system_program_account() -> TestAccount {
+    TestAccount::new(solana_program::system_program::ID, Pubkey::default(), 0).executable()
+}
+
 fn insurance_ledger_account() -> TestAccount {
     TestAccount::new(
         Pubkey::new_unique(),
@@ -986,6 +1006,8 @@ fn top_up_backing_bucket(
     let mut source = user_token_account(authority.key, mint, amount_u64);
     let mut vault = vault_token_account(market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg1 = canonical_backing_ledger_account(&market, domain);
+    let mut __sp1 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain,
@@ -998,7 +1020,10 @@ fn top_up_backing_bucket(
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg1,
+        &mut __sp1,
+    ],
     )
     .unwrap();
 }
@@ -2416,6 +2441,8 @@ fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
     .unwrap();
     let mut backing_source = user_token_account(backing_authority.key, mint, 25);
     let mut vault = vault_token_account(&market, mint, 0);
+    let mut __lg2 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp2 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -2428,7 +2455,10 @@ fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
             &mut backing_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg2,
+        &mut __sp2,
+    ],
     )
     .unwrap();
 
@@ -2526,6 +2556,7 @@ fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
     )
     .unwrap();
     let mut backing_dest = user_token_account(backing_authority.key, mint, 0);
+    let mut __lg1 = canonical_backing_ledger_account(&market, 2);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 2,
@@ -2538,7 +2569,9 @@ fn v16_wrapper_permissionless_dynamic_market_drains_after_positions_close() {
             &mut vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg1,
+    ],
     )
     .unwrap();
 
@@ -2786,6 +2819,7 @@ fn v16_wrapper_shutdown_asset_force_closes_drains_retires_and_reuses_slot() {
     )
     .unwrap();
     let mut local_backing_dest = user_token_account(backing_authority.key, mint, 0);
+    let mut __lg2 = canonical_backing_ledger_account(&market, 2);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 2,
@@ -2798,10 +2832,13 @@ fn v16_wrapper_shutdown_asset_force_closes_drains_retires_and_reuses_slot() {
             &mut vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg2,
+    ],
     )
     .unwrap();
     let mut admin_backing_dest = user_token_account(admin.key, mint, 0);
+    let mut __lg3 = canonical_backing_ledger_account(&market, 3);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 3,
@@ -2814,7 +2851,9 @@ fn v16_wrapper_shutdown_asset_force_closes_drains_retires_and_reuses_slot() {
             &mut vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg3,
+    ],
     )
     .unwrap();
 
@@ -3146,6 +3185,7 @@ fn v16_wrapper_permissionless_market_shutdown_force_closes_recovers_and_reuses_s
     // not by admin. v17 verify_withdrawable_token_accounts checks dest.owner == signer.key.
     let mut backing_dest = user_token_account(backing_authority.key, mint, 0);
     for (domain, amount) in [(2u16, 20u128), (3u16, 25u128)] {
+        let mut __lg4 = canonical_backing_ledger_account(&market, 0);
         run_ix(
             Instruction::WithdrawBackingBucket { domain, amount },
             &mut [
@@ -3155,7 +3195,9 @@ fn v16_wrapper_permissionless_market_shutdown_force_closes_recovers_and_reuses_s
                 &mut vault,
                 &mut vault_auth,
                 &mut token_program,
-            ],
+            
+            &mut __lg4,
+        ],
         )
         .unwrap();
     }
@@ -3292,6 +3334,8 @@ fn v16_wrapper_shutdown_admin_drain_timeout_ledgers_and_backing_earnings() {
 
     let mut local_backing_ledger = backing_domain_ledger_account();
     let mut backing_source = user_token_account(backing_authority.key, mint, 20);
+    let mut __lg3 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp3 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -3305,7 +3349,9 @@ fn v16_wrapper_shutdown_admin_drain_timeout_ledgers_and_backing_earnings() {
             &mut vault,
             &mut token_program,
             &mut local_backing_ledger,
-        ],
+        
+        &mut __sp3,
+    ],
     )
     .unwrap();
     {
@@ -3449,6 +3495,7 @@ fn v16_wrapper_shutdown_admin_drain_timeout_ledgers_and_backing_earnings() {
     assert_eq!(admin_backing_ledger_state.authority, admin.key.to_bytes());
     assert_eq!(admin_backing_ledger_state.total_earnings_withdrawn_atoms, 5);
 
+    let mut __lg5 = canonical_backing_ledger_account(&market, 2);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 2,
@@ -3461,7 +3508,9 @@ fn v16_wrapper_shutdown_admin_drain_timeout_ledgers_and_backing_earnings() {
             &mut vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg5,
+    ],
     )
     .unwrap();
 
@@ -6470,6 +6519,8 @@ fn v16_wrapper_top_up_paths_reject_after_permissionless_resolve_maturity() {
 
     let mut source = user_token_account(bucket_authority.key, mint, 100);
     let before = market.data.clone();
+    let mut __lg4 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp4 = system_program_account();
     let top_up_backing = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -6482,7 +6533,10 @@ fn v16_wrapper_top_up_paths_reject_after_permissionless_resolve_maturity() {
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg4,
+        &mut __sp4,
+    ],
     );
     assert_err_and_market_unchanged(top_up_backing, &market, &before);
 }
@@ -6863,6 +6917,8 @@ fn v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_second
     )
     .unwrap();
     let mut backing_source = user_token_account(backing_authority.key, primary_key, 30);
+    let mut __lg5 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp5 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -6875,7 +6931,10 @@ fn v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_second
             &mut backing_source,
             &mut primary_vault,
             &mut token_program,
-        ],
+        
+        &mut __lg5,
+        &mut __sp5,
+    ],
     )
     .unwrap();
     {
@@ -6906,6 +6965,7 @@ fn v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_second
     assert_err_and_market_unchanged(admin_insurance, &market, &before_admin_insurance);
 
     let before_admin_backing = market.data.clone();
+    let mut __lg6 = canonical_backing_ledger_account(&market, 2);
     let admin_backing = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 2,
@@ -6918,7 +6978,9 @@ fn v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_second
             &mut secondary_vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg6,
+    ],
     );
     assert_err_and_market_unchanged(admin_backing, &market, &before_admin_backing);
 
@@ -6997,6 +7059,7 @@ fn v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_second
     )
     .unwrap();
 
+    let mut __lg7 = canonical_backing_ledger_account(&market, 2);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 2,
@@ -7009,7 +7072,9 @@ fn v16_wrapper_domain_withdrawals_reject_admin_before_shutdown_and_accept_second
             &mut secondary_vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg7,
+    ],
     )
     .unwrap();
 
@@ -7048,6 +7113,8 @@ fn v16_wrapper_backing_bucket_authority_is_domain_scoped_for_dynamic_assets() {
     let mut admin_source = user_token_account(admin.key, mint, 10);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg6 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp6 = system_program_account();
     let unauthorized = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -7060,11 +7127,16 @@ fn v16_wrapper_backing_bucket_authority_is_domain_scoped_for_dynamic_assets() {
             &mut admin_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg6,
+        &mut __sp6,
+    ],
     );
     assert_err_and_market_unchanged(unauthorized, &market, &before);
 
     let mut source = user_token_account(backing_authority.key, mint, 10);
+    let mut __lg7 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp7 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -7077,7 +7149,10 @@ fn v16_wrapper_backing_bucket_authority_is_domain_scoped_for_dynamic_assets() {
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg7,
+        &mut __sp7,
+    ],
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
@@ -7190,6 +7265,8 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
     let mut attacker_src = user_token_account(attacker.key, mint, 100);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg8 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp8 = system_program_account();
     let unauthorized = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7202,11 +7279,16 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
             &mut attacker_src,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg8,
+        &mut __sp8,
+    ],
     );
     assert_err_and_market_unchanged(unauthorized, &market, &before);
 
     let mut source = user_token_account(bucket_authority.key, mint, 100);
+    let mut __lg9 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp9 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7219,7 +7301,10 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg9,
+        &mut __sp9,
+    ],
     )
     .unwrap();
 
@@ -7249,6 +7334,8 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
 
     let before_bad_domain = market.data.clone();
     let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let mut __lg10 = canonical_backing_ledger_account(&market, 32);
+    let mut __sp10 = system_program_account();
     let bad_domain = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 32,
@@ -7261,12 +7348,17 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg10,
+        &mut __sp10,
+    ],
     );
     assert_err_and_market_unchanged(bad_domain, &market, &before_bad_domain);
 
     let before_inactive_domain = market.data.clone();
     let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let mut __lg11 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp11 = system_program_account();
     let inactive_domain = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -7279,12 +7371,17 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg11,
+        &mut __sp11,
+    ],
     );
     assert_err_and_market_unchanged(inactive_domain, &market, &before_inactive_domain);
 
     let before_bad_expiry = market.data.clone();
     let mut source = user_token_account(bucket_authority.key, mint, 1);
+    let mut __lg12 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp12 = system_program_account();
     let bad_expiry = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7297,7 +7394,10 @@ fn v16_wrapper_top_up_backing_bucket_uses_separate_authority_and_domain_ledger()
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg12,
+        &mut __sp12,
+    ],
     );
     assert_err_and_market_unchanged(bad_expiry, &market, &before_bad_expiry);
 
@@ -7344,6 +7444,8 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
     let mut source = user_token_account(bucket_authority.key, mint, 100);
     let mut vault = vault_token_account(&market, mint, 100);
     let mut token_program = token_program_account();
+    let mut __lg13 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp13 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7357,7 +7459,9 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault,
             &mut token_program,
             &mut ledger,
-        ],
+        
+        &mut __sp13,
+    ],
     )
     .unwrap();
 
@@ -7369,6 +7473,7 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
     let ledger_before = ledger.data.clone();
     let mut attacker_dest = user_token_account(attacker.key, mint, 0);
     let mut vault_auth = vault_authority_account(&market);
+    let mut __lg8 = canonical_backing_ledger_account(&market, 1);
     let unauthorized = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7381,13 +7486,16 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg8,
+    ],
     );
     assert_err_and_market_unchanged(unauthorized, &market, &topped_up);
     assert_eq!(ledger.data, ledger_before);
 
     let mut impostor_ledger = backing_domain_ledger_account();
     let mut substituted_dest = user_token_account(bucket_authority.key, mint, 0);
+    let mut __lg9 = canonical_backing_ledger_account(&market, 1);
     let substituted_ledger = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7401,12 +7509,14 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault_auth,
             &mut token_program,
             &mut impostor_ledger,
-        ],
+        
+    ],
     );
     assert_err_and_market_unchanged(substituted_ledger, &market, &topped_up);
     assert_eq!(ledger.data, ledger_before);
 
     let mut dest = user_token_account(bucket_authority.key, mint, 0);
+    let mut __lg10 = canonical_backing_ledger_account(&market, 1);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7420,7 +7530,8 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
@@ -7450,6 +7561,7 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
     assert_eq!(ledger_after_withdraw.total_principal_withdrawn_atoms, 40);
 
     let before_overdraw = market.data.clone();
+    let mut __lg11 = canonical_backing_ledger_account(&market, 1);
     let overdraw = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7463,7 +7575,8 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     );
     assert_err_and_market_unchanged(overdraw, &market, &before_overdraw);
 
@@ -7481,6 +7594,7 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
         group.pnl_pos_bound_tot = 40;
         state::write_market(&mut market.data, &cfg, &group).unwrap();
     }
+    let mut __lg12 = canonical_backing_ledger_account(&market, 1);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7494,7 +7608,8 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
@@ -7514,6 +7629,7 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
     );
 
     let claim_backed = market.data.clone();
+    let mut __lg13 = canonical_backing_ledger_account(&market, 1);
     let claim_dilution = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7527,7 +7643,8 @@ fn v16_wrapper_withdraw_backing_bucket_returns_only_unencumbered_backing() {
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     );
     assert_err_and_market_unchanged(claim_dilution, &market, &claim_backed);
 }
@@ -7548,6 +7665,8 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drai
     let mut source = user_token_account(admin.key, mint, 25);
     let mut vault = vault_token_account(&market, mint, 25);
     let mut token_program = token_program_account();
+    let mut __lg14 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp14 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7561,12 +7680,15 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drai
             &mut vault,
             &mut token_program,
             &mut ledger,
-        ],
+        
+        &mut __sp14,
+    ],
     )
     .unwrap();
 
     let mut dest = user_token_account(admin.key, mint, 0);
     let mut vault_auth = vault_authority_account(&market);
+    let mut __lg14 = canonical_backing_ledger_account(&market, 1);
     let zero = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7580,7 +7702,8 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drai
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     );
     assert!(zero.is_err());
 
@@ -7596,6 +7719,7 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drai
         set_stress(&mut group);
         state::write_market(&mut market.data, &cfg, &group).unwrap();
         let stressed = market.data.clone();
+        let mut __lg15 = canonical_backing_ledger_account(&market, 1);
         let stressed_withdraw = run_ix(
             Instruction::WithdrawBackingBucket {
                 domain: 1,
@@ -7609,12 +7733,14 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drai
                 &mut vault_auth,
                 &mut token_program,
                 &mut ledger,
-            ],
+            
+        ],
         );
         assert_err_and_market_unchanged(stressed_withdraw, &market, &stressed);
     }
     market.data.copy_from_slice(&topped_up);
 
+    let mut __lg16 = canonical_backing_ledger_account(&market, 1);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7628,7 +7754,8 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_stress_and_allows_full_clean_drai
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
@@ -7650,6 +7777,8 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
     let mut source = user_token_account(admin.key, mint, 10);
     let mut vault = vault_token_account(&market, mint, 10);
     let mut token_program = token_program_account();
+    let mut __lg15 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp15 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7662,7 +7791,10 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg15,
+        &mut __sp15,
+    ],
     )
     .unwrap();
 
@@ -7670,6 +7802,7 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
     let mut wrong_dest_owner = user_token_account(attacker.key, mint, 0);
     let mut vault_auth = vault_authority_account(&market);
     let before_wrong_dest = market.data.clone();
+    let mut __lg17 = canonical_backing_ledger_account(&market, 1);
     let wrong_dest = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7682,13 +7815,16 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
             &mut vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg17,
+    ],
     );
     assert_err_and_market_unchanged(wrong_dest, &market, &before_wrong_dest);
 
     let mut dest = user_token_account(admin.key, mint, 0);
     let mut wrong_vault_auth = signer();
     let before_wrong_auth = market.data.clone();
+    let mut __lg18 = canonical_backing_ledger_account(&market, 1);
     let wrong_auth = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7701,13 +7837,16 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
             &mut vault,
             &mut wrong_vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg18,
+    ],
     );
     assert_err_and_market_unchanged(wrong_auth, &market, &before_wrong_auth);
 
     let wrong_mint = Pubkey::new_unique();
     let mut wrong_vault = vault_token_account(&market, wrong_mint, 10);
     let before_wrong_vault = market.data.clone();
+    let mut __lg19 = canonical_backing_ledger_account(&market, 1);
     let wrong_vault_result = run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7720,7 +7859,9 @@ fn v16_wrapper_withdraw_backing_bucket_rejects_bad_custody_accounts() {
             &mut wrong_vault,
             &mut vault_auth,
             &mut token_program,
-        ],
+        
+        &mut __lg19,
+    ],
     );
     assert_err_and_market_unchanged(wrong_vault_result, &market, &before_wrong_vault);
 }
@@ -7741,6 +7882,8 @@ fn v16_wrapper_backing_domain_ledger_tracks_authority_topup_earnings_and_withdra
     let mut source = user_token_account(admin.key, mint, 100);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg16 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp16 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7754,7 +7897,9 @@ fn v16_wrapper_backing_domain_ledger_tracks_authority_topup_earnings_and_withdra
             &mut vault,
             &mut token_program,
             &mut ledger,
-        ],
+        
+        &mut __sp16,
+    ],
     )
     .unwrap();
 
@@ -7815,6 +7960,7 @@ fn v16_wrapper_backing_domain_ledger_tracks_authority_topup_earnings_and_withdra
     assert_eq!(group.source_backing_buckets[1].utilization_fee_earnings, 10);
     assert_eq!(group.vault, 110);
 
+    let mut __lg20 = canonical_backing_ledger_account(&market, 1);
     run_ix(
         Instruction::WithdrawBackingBucket {
             domain: 1,
@@ -7828,7 +7974,8 @@ fn v16_wrapper_backing_domain_ledger_tracks_authority_topup_earnings_and_withdra
             &mut vault_auth,
             &mut token_program,
             &mut ledger,
-        ],
+        
+    ],
     )
     .unwrap();
     let ledger_state = state::read_backing_domain_ledger(&ledger.data).unwrap();
@@ -7846,12 +7993,16 @@ fn v16_wrapper_backing_domain_ledger_tracks_authority_topup_earnings_and_withdra
 fn v16_wrapper_backing_domain_ledger_tracks_unavailable_principal_loss_and_recovery() {
     let mut admin = signer();
     let mut market = market_account();
-    let mut ledger = backing_domain_ledger_account();
+    // #433: TopUpBackingBucket pins the ledger to its PDA, so the random-address helper
+    // is refused on the SETUP top-up. The wrong-ledger cases below build their own.
+    let mut ledger = canonical_backing_ledger_account(&market, 1);
     let mint = init_market(&mut admin, &mut market);
 
     let mut source = user_token_account(admin.key, mint, 50);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg17 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp17 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7865,7 +8016,9 @@ fn v16_wrapper_backing_domain_ledger_tracks_unavailable_principal_loss_and_recov
             &mut vault,
             &mut token_program,
             &mut ledger,
-        ],
+        
+        &mut __sp17,
+    ],
     )
     .unwrap();
 
@@ -7907,6 +8060,8 @@ fn v16_wrapper_backing_domain_ledger_tracks_unavailable_principal_loss_and_recov
     assert_eq!(ledger_state.cumulative_recovery_atoms, 0);
     assert_eq!(ledger_state.last_observed_unavailable_principal_atoms, 40);
 
+    let mut __lg18 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp18 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7920,7 +8075,9 @@ fn v16_wrapper_backing_domain_ledger_tracks_unavailable_principal_loss_and_recov
             &mut vault,
             &mut token_program,
             &mut ledger,
-        ],
+        
+        &mut __sp18,
+    ],
     )
     .unwrap();
     run_ix(
@@ -7940,12 +8097,16 @@ fn v16_wrapper_backing_domain_ledger_rejects_wrong_authority_and_domain() {
     let mut admin = signer();
     let mut attacker = signer();
     let mut market = market_account();
-    let mut ledger = backing_domain_ledger_account();
+    // #433: TopUpBackingBucket pins the ledger to its PDA, so the random-address helper
+    // is refused on the SETUP top-up. The wrong-ledger cases below build their own.
+    let mut ledger = canonical_backing_ledger_account(&market, 1);
     let mint = init_market(&mut admin, &mut market);
 
     let mut source = user_token_account(admin.key, mint, 10);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg19 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp19 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -7959,7 +8120,9 @@ fn v16_wrapper_backing_domain_ledger_rejects_wrong_authority_and_domain() {
             &mut vault,
             &mut token_program,
             &mut ledger,
-        ],
+        
+        &mut __sp19,
+    ],
     )
     .unwrap();
 
@@ -8078,6 +8241,8 @@ fn v16_wrapper_source_backed_positive_pnl_converts_from_backing_not_insurance() 
     let mut source = user_token_account(admin.key, mint, 40);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg20 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp20 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -8090,7 +8255,10 @@ fn v16_wrapper_source_backed_positive_pnl_converts_from_backing_not_insurance() 
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg20,
+        &mut __sp20,
+    ],
     )
     .unwrap();
 
@@ -8157,6 +8325,8 @@ fn v16_wrapper_backing_top_up_refills_provider_receivable_in_engine() {
     let mut source = user_token_account(admin.key, mint, 50);
     let mut vault = vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg21 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp21 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -8169,7 +8339,10 @@ fn v16_wrapper_backing_top_up_refills_provider_receivable_in_engine() {
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg21,
+        &mut __sp21,
+    ],
     )
     .unwrap();
 
@@ -8214,6 +8387,8 @@ fn v16_wrapper_backing_top_up_refills_provider_receivable_in_engine() {
         assert_eq!(group.source_credit[1].fresh_reserved_backing_num, 0);
     }
 
+    let mut __lg22 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp22 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -8226,7 +8401,10 @@ fn v16_wrapper_backing_top_up_refills_provider_receivable_in_engine() {
             &mut source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg22,
+        &mut __sp22,
+    ],
     )
     .unwrap();
     let (_, group) = state::read_market(&market.data).unwrap();
@@ -8279,6 +8457,8 @@ fn v16_wrapper_exploited_oracle_pnl_cannot_exit_against_unrelated_backing_or_ins
     )
     .unwrap();
     let mut unrelated_source = user_token_account(admin.key, mint, 100);
+    let mut __lg23 = canonical_backing_ledger_account(&market, 0);
+    let mut __sp23 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 0,
@@ -8291,7 +8471,10 @@ fn v16_wrapper_exploited_oracle_pnl_cannot_exit_against_unrelated_backing_or_ins
             &mut unrelated_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg23,
+        &mut __sp23,
+    ],
     )
     .unwrap();
 
@@ -8383,6 +8566,8 @@ fn v16_wrapper_exploited_added_asset_pnl_exit_caps_to_its_source_domain_backing(
     let mut corrupt_domain_source = user_token_account(admin.key, mint, 30);
     let mut vault = vault_token_account(&market, mint, 110);
     let mut token_program = token_program_account();
+    let mut __lg24 = canonical_backing_ledger_account(&market, 0);
+    let mut __sp24 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 0,
@@ -8395,9 +8580,14 @@ fn v16_wrapper_exploited_added_asset_pnl_exit_caps_to_its_source_domain_backing(
             &mut unrelated_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg24,
+        &mut __sp24,
+    ],
     )
     .unwrap();
+    let mut __lg25 = canonical_backing_ledger_account(&market, 2);
+    let mut __sp25 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 2,
@@ -8410,7 +8600,10 @@ fn v16_wrapper_exploited_added_asset_pnl_exit_caps_to_its_source_domain_backing(
             &mut corrupt_domain_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg25,
+        &mut __sp25,
+    ],
     )
     .unwrap();
 
@@ -8514,6 +8707,8 @@ fn v16_wrapper_cross_margin_source_claims_leave_unbacked_corrupt_claim_unconvert
     let mut legit_source = user_token_account(admin.key, mint, 30);
     let mut vault = vault_token_account(&market, mint, 30);
     let mut token_program = token_program_account();
+    let mut __lg26 = canonical_backing_ledger_account(&market, 0);
+    let mut __sp26 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 0,
@@ -8526,7 +8721,10 @@ fn v16_wrapper_cross_margin_source_claims_leave_unbacked_corrupt_claim_unconvert
             &mut legit_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg26,
+        &mut __sp26,
+    ],
     )
     .unwrap();
 
@@ -10518,6 +10716,8 @@ fn v16_wrapper_token_accounts_must_be_initialized_for_custody_paths() {
     assert_eq!(portfolio.data, before_portfolio);
 
     let mut admin_source = user_token_account(admin.key, mint, 1_000);
+    let mut __lg27 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp27 = system_program_account();
     let frozen_backing_vault = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -10530,7 +10730,10 @@ fn v16_wrapper_token_accounts_must_be_initialized_for_custody_paths() {
             &mut admin_source,
             &mut frozen_vault,
             &mut token_program,
-        ],
+        
+        &mut __lg27,
+        &mut __sp27,
+    ],
     );
     assert_err_and_market_unchanged(frozen_backing_vault, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
@@ -10600,6 +10803,8 @@ fn v16_wrapper_spl_u64_amount_limit_rejects_before_mutation() {
     assert_eq!(portfolio.data, before_portfolio);
 
     let mut admin_source = user_token_account(admin.key, mint, u64::MAX);
+    let mut __lg28 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp28 = system_program_account();
     let backing_too_large = run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -10612,7 +10817,10 @@ fn v16_wrapper_spl_u64_amount_limit_rejects_before_mutation() {
             &mut admin_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg28,
+        &mut __sp28,
+    ],
     );
     assert_err_and_market_unchanged(backing_too_large, &market, &before_market);
     assert_eq!(portfolio.data, before_portfolio);
@@ -10684,6 +10892,8 @@ fn v16_wrapper_zero_amount_custody_paths_are_noop_without_state_drift() {
     assert_eq!(portfolio.data, before_portfolio);
 
     let mut admin_source = user_token_account(admin.key, mint, 0);
+    let mut __lg29 = canonical_backing_ledger_account(&market, 1);
+    let mut __sp29 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 1,
@@ -10696,7 +10906,10 @@ fn v16_wrapper_zero_amount_custody_paths_are_noop_without_state_drift() {
             &mut admin_source,
             &mut vault,
             &mut token_program,
-        ],
+        
+        &mut __lg29,
+        &mut __sp29,
+    ],
     )
     .unwrap();
     assert_eq!(market.data, before_market);
@@ -16970,6 +17183,8 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
 
         match op {
             0 => {
+                let mut __lg30 = canonical_backing_ledger_account(&market, domain);
+                let mut __sp30 = system_program_account();
                 let res = run_ix(
                     Instruction::TopUpBackingBucket {
                         domain,
@@ -16982,7 +17197,10 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
                         &mut admin_tok,
                         &mut vault_tok,
                         &mut token_program,
-                    ],
+                    
+                    &mut __lg30,
+                    &mut __sp30,
+                ],
                 );
                 if res.is_ok() {
                     fresh[d] += amount;
@@ -16990,6 +17208,7 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
                 }
             }
             1 => {
+                let mut __lg21 = canonical_backing_ledger_account(&market, 0);
                 let res = run_ix(
                     Instruction::WithdrawBackingBucket { domain, amount },
                     &mut [
@@ -16999,7 +17218,9 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
                         &mut vault_tok,
                         &mut vault_auth,
                         &mut token_program,
-                    ],
+                    
+                    &mut __lg21,
+                ],
                 );
                 if res.is_ok() {
                     fresh[d] -= amount;
@@ -17016,6 +17237,7 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
                 // Deliberate over-withdraw beyond fresh backing must be rejected.
                 let over = fresh[d] + 1 + (next(&mut rng) % 50) as u128;
                 let before = market.data.clone();
+                let mut __lg22 = canonical_backing_ledger_account(&market, domain);
                 let res = run_ix(
                     Instruction::WithdrawBackingBucket {
                         domain,
@@ -17028,7 +17250,9 @@ fn v16_wrapper_stress_per_domain_backing_never_overdraws() {
                         &mut vault_tok,
                         &mut vault_auth,
                         &mut token_program,
-                    ],
+                    
+                    &mut __lg22,
+                ],
                 );
                 assert!(
                     res.is_err(),
@@ -17125,6 +17349,8 @@ fn v16_wrapper_oracle_attacker_cannot_drain_other_domains() {
         )
         .unwrap();
     }
+    let mut __lg31 = canonical_backing_ledger_account(&market, 4);
+    let mut __sp31 = system_program_account();
     run_ix(
         Instruction::TopUpBackingBucket {
             domain: 4,
@@ -17137,7 +17363,10 @@ fn v16_wrapper_oracle_attacker_cannot_drain_other_domains() {
             &mut admin_src,
             &mut vault_tok,
             &mut token_program,
-        ],
+        
+        &mut __lg31,
+        &mut __sp31,
+    ],
     )
     .unwrap();
 
@@ -17910,9 +18139,14 @@ fn v16_wrapper_topup_backing_bucket_rejects_noncanonical_vault() {
     let mut source = user_token_account(admin.key, mint, 1_000_000);
     let mut bad_vault = noncanonical_vault_token_account(&market, mint, 0);
     let mut token_program = token_program_account();
+    let mut __lg32 = canonical_backing_ledger_account(&market, 0);
+    let mut __sp32 = system_program_account();
     let rejected = run_ix(
         Instruction::TopUpBackingBucket { domain: 0, amount: 1_000, expiry_slot: 1_000_000 },
-        &mut [&mut admin, &mut market, &mut source, &mut bad_vault, &mut token_program],
+        &mut [&mut admin, &mut market, &mut source, &mut bad_vault, &mut token_program,
+        &mut __lg32,
+        &mut __sp32,
+    ],
     );
     assert_eq!(
         rejected,

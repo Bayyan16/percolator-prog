@@ -10448,16 +10448,48 @@ pub mod processor {
         let source_token = account(accounts, 2)?;
         let vault_token = account(accounts, 3)?;
         let token_program = account(accounts, 4)?;
-        let ledger_ai = accounts.get(5);
+        // #433 route (b): the ledger is MANDATORY here, and this handler CREATES it when it
+        // does not exist. Creation is the half the first fix was missing.
+        //
+        // Requiring the ledger on WITHDRAWAL alone (45bba89e) stranded funds: nothing
+        // allocated the PDA, so it had to already exist, and only the LP-vault handlers ever
+        // made one. Requiring it on the way IN, with creation, guarantees one exists by the
+        // time anyone withdraws — which is what makes the withdrawal-side requirement safe
+        // instead of a trap.
+        //
+        // Deliberately the DEPOSIT side. A caller who cannot form this instruction simply
+        // does not deposit; the same mistake on the withdrawal side locks money already in.
+        // Breaking deposits is recoverable, breaking withdrawals is not.
+        let ledger_ai = account(accounts, 5)?;
+        let system_program_ai = account(accounts, 6)?;
         expect_signer(signer)?;
         expect_writable(market_ai)?;
         expect_writable(source_token)?;
         expect_writable(vault_token)?;
         expect_owner(market_ai, program_id)?;
-        if let Some(ledger_ai) = ledger_ai {
-            expect_writable(ledger_ai)?;
-            expect_owner(ledger_ai, program_id)?;
+        expect_writable(ledger_ai)?;
+        let (ledger_pda, ledger_bump) =
+            state::derive_lp_backing_ledger(program_id, market_ai.key, domain);
+        expect_key(ledger_ai, &ledger_pda)?;
+        if ledger_ai.data_is_empty() {
+            let domain_bytes = domain.to_le_bytes();
+            let bump_bytes = [ledger_bump];
+            let seeds: &[&[u8]] = &[
+                crate::constants::LP_BACKING_LEDGER_SEED,
+                market_ai.key.as_ref(),
+                domain_bytes.as_ref(),
+                bump_bytes.as_ref(),
+            ];
+            create_pda_account(
+                signer,
+                ledger_ai,
+                system_program_ai,
+                state::backing_domain_ledger_account_len(),
+                program_id,
+                seeds,
+            )?;
         }
+        expect_owner(ledger_ai, program_id)?;
         verify_token_program(token_program)?;
         let domain_usize = domain as usize;
         let (cfg_pre, authorities) = {
@@ -10493,11 +10525,7 @@ pub mod processor {
             require_domain_accepts_live_topup_view(&group, domain_usize)?;
             let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
             expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
-            let mut ledger_data = if let Some(ledger_ai) = ledger_ai {
-                Some(ledger_ai.try_borrow_mut_data()?)
-            } else {
-                None
-            };
+            let mut ledger_data = Some(ledger_ai.try_borrow_mut_data()?);
             let mut ledger_state = if let Some(data) = ledger_data.as_deref() {
                 let (_, bucket) = backing_domain_parts_view(&group, domain as usize)?;
                 let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
@@ -10615,21 +10643,19 @@ pub mod processor {
         // principal-consistency guard and the decrement are skipped. Closing it needs the
         // ledger to be creatable on this path (payer + system program) or mandatory on
         // TopUpBackingBucket first — not a bare `account(accounts, 6)?`.
-        let ledger_ai = accounts.get(6);
+        // MANDATORY again, and now safe: `handle_top_up_backing_bucket` CREATES this PDA, so
+        // one exists before any withdrawal is possible. Requiring it WITHOUT that creation
+        // path (45bba89e) is what stranded funds — see the revert note in git history.
+        let ledger_ai = account(accounts, 6)?;
         expect_signer(authority)?;
         expect_writable(market_ai)?;
         expect_writable(dest_token)?;
         expect_writable(vault_token)?;
         expect_owner(market_ai, program_id)?;
-        if let Some(ledger_ai) = ledger_ai {
-            expect_writable(ledger_ai)?;
-            expect_owner(ledger_ai, program_id)?;
-            // KEPT from 45bba89e: when the ledger IS supplied it is pinned to its PDA. The
-            // optional path never had this, so a caller could pass any program-owned account.
-            let (ledger_pda, _) =
-                state::derive_lp_backing_ledger(program_id, market_ai.key, domain);
-            expect_key(ledger_ai, &ledger_pda)?;
-        }
+        expect_writable(ledger_ai)?;
+        expect_owner(ledger_ai, program_id)?;
+        let (ledger_pda, _) = state::derive_lp_backing_ledger(program_id, market_ai.key, domain);
+        expect_key(ledger_ai, &ledger_pda)?;
         verify_token_program(token_program)?;
         if amount == 0 {
             return Err(PercolatorError::InvalidInstruction.into());
@@ -10693,7 +10719,7 @@ pub mod processor {
             };
 
             let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
-            if let Some(ledger_ai) = ledger_ai {
+            {
                 let mut ledger_data = ledger_ai.try_borrow_mut_data()?;
                 let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
                     &ledger_data,
@@ -10719,11 +10745,6 @@ pub mod processor {
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
                 group.validate_shape().map_err(map_v16_error)?;
                 write_or_init_backing_domain_ledger(&mut ledger_data, &ledger, initialized)?;
-            } else {
-                group
-                    .withdraw_fresh_counterparty_backing_not_atomic(domain_usize, amount)
-                    .map_err(map_v16_error)?;
-                group.validate_shape().map_err(map_v16_error)?;
             }
         }
 

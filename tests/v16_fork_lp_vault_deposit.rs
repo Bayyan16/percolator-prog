@@ -638,7 +638,10 @@ fn lp_deposit_backing_state_matches_top_up() {
     // admin's source funds + a client-managed ledger account.
     let source_a = Pubkey::new_unique();
     set_token(&mut env_a.svm, source_a, env_a.collateral_mint, admin_a.pubkey(), 10_000_000);
-    let ledger_a = Pubkey::new_unique();
+    // #433: the ledger is now pinned to its PDA on TopUpBackingBucket too, so a random
+    // address is refused. This test wants a working top-up to compare against LpDeposit,
+    // not a substitution check — derive the canonical one.
+    let (ledger_a, _) = state::derive_lp_backing_ledger(&env_a.program_id, &env_a.market, DOMAIN);
     env_a.svm.set_account(
         ledger_a,
         Account {
@@ -661,6 +664,9 @@ fn lp_deposit_backing_state_matches_top_up() {
             AccountMeta::new(env_a.vault_token, false),
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(ledger_a, false),
+            // #433: TopUpBackingBucket now creates the ledger PDA when absent, so it takes
+            // the system program. Here the ledger already exists, so creation is skipped.
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
         ],
         &[&admin_a],
     )

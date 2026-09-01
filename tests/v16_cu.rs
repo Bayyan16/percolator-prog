@@ -2207,6 +2207,8 @@ impl V16CuEnv {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(ledger, false),
+            
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             &[&self.admin],
         )
@@ -2356,6 +2358,8 @@ impl V16CuEnv {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(ledger, false),
+            
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             &[&self.admin],
         )
@@ -2399,6 +2403,8 @@ impl V16CuEnv {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(ledger, false),
+            
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             &[&self.admin],
         )
@@ -2432,6 +2438,8 @@ impl V16CuEnv {
                 AccountMeta::new(self.vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
                 AccountMeta::new(ledger, false),
+            
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             &[authority],
         )
@@ -3270,7 +3278,9 @@ fn v16_bpf_failed_insurance_topup_transfer_rolls_back_budget_and_ledger() {
 #[test]
 fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
     let mut env = V16CuEnv::new();
-    let ledger = env.backing_domain_ledger_account();
+    // #433: TopUpBackingBucket now pins the ledger to its PDA, so a random-address
+    // ledger is refused. These fixtures want a working top-up, not a substitution test.
+    let ledger = env.canonical_backing_domain_ledger_account(1);
     let source = Pubkey::new_unique();
     env.svm
         .set_account(
@@ -3305,7 +3315,9 @@ fn v16_bpf_failed_backing_topup_transfer_rolls_back_bucket_and_ledger() {
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(spl_token::ID, false),
             AccountMeta::new(ledger, false),
-        ],
+        
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+            ],
         &[&env.admin],
     );
 
@@ -3785,23 +3797,13 @@ fn v16_bpf_withdraw_backing_bucket_requires_canonical_ledger() {
         withdraw_accounts(None),
         &[&env.admin],
     );
-    // ⚠️ #433 IS OPEN, AND THIS ASSERTS THE DEFECT RATHER THAN THE FIX.
+    // #433 CLOSED: omitting the ledger fails closed again.
     //
-    // Omitting the ledger SUCCEEDS: the withdrawal goes through and the ledger is never
-    // decremented. Making it mandatory (45bba89e) closed #433 and was deployed — and it
-    // STRANDED FUNDS. The ledger PDA is only ever allocated by the LP-vault handlers, so on
-    // a market with no LP vault `expect_owner(ledger_ai, program_id)` fails and backing
-    // deposited via the 5-account TopUpBackingBucket becomes unwithdrawable. That is worse
-    // than the accounting bypass it closed, so it was reverted. Upstream keeps the account
-    // optional too.
-    //
-    // If this ever REJECTS again, a fix landed — check it created a path for the ledger to
-    // EXIST (payer + system program here, or mandatory on TopUpBackingBucket) before
-    // treating it as done.
-    assert!(
-        omitted.is_ok(),
-        "#433: omitting the ledger should still be accepted until the fix creates the PDA"
-    );
+    // Safe ONLY because `handle_top_up_backing_bucket` now CREATES this PDA, so one always
+    // exists before a withdrawal is possible. An earlier fix (45bba89e) required the account
+    // WITHOUT that creation path, shipped, and stranded backing on every market with no LP
+    // vault. The requirement and the creation are one change, not two.
+    assert!(omitted.is_err(), "omitting the ledger must fail closed");
 
     env.svm.expire_blockhash();
     let substituted = send_tx(
@@ -3816,12 +3818,12 @@ fn v16_bpf_withdraw_backing_bucket_requires_canonical_ledger() {
         substituted.is_err(),
         "a noncanonical program-owned ledger must fail closed"
     );
-    // The ledger account itself is untouched by both attempts, and the SUBSTITUTED one is
-    // still refused — that PDA pin is the part of 45bba89e worth keeping and it survived the
-    // revert. The market/vault totals are NOT re-asserted here: the omitted withdrawal above
-    // succeeded, so they legitimately moved.
+    // Both attempts failed closed, so NOTHING moved. That total absence of drift is the
+    // property — a partial mutation on a rejected instruction would be its own defect.
+    assert_eq!(env.svm.get_account(&env.market).unwrap().data, market_before);
     assert_eq!(env.svm.get_account(&ledger).unwrap().data, ledger_before);
-    let _ = (market_before, vault_before, dest_before);
+    assert_eq!(env.token_amount(env.vault), vault_before);
+    assert_eq!(env.token_amount(dest), dest_before);
 
     env.svm.expire_blockhash();
     send_tx(
@@ -3847,10 +3849,12 @@ fn v16_bpf_withdraw_backing_bucket_requires_canonical_ledger() {
     // That 40-atom gap between `total_principal_atoms` and the real vault balance is exactly
     // the accounting bypass #433 reports, measured. When #433 is fixed properly these two
     // must agree again.
-    assert_eq!(ledger_after.total_principal_atoms, 60, "ledger booked only the canonical withdrawal");
+    // Exactly ONE withdrawal happened and the books match the vault. If these two ever
+    // diverge again, an unbooked withdrawal got through — which is #433 itself.
+    assert_eq!(ledger_after.total_principal_atoms, 60);
     assert_eq!(ledger_after.total_principal_withdrawn_atoms, 40);
-    assert_eq!(env.token_amount(env.vault), 20, "vault paid BOTH withdrawals — the #433 gap");
-    assert_eq!(env.token_amount(dest), 80, "destination received both 40s");
+    assert_eq!(env.token_amount(env.vault), 60);
+    assert_eq!(env.token_amount(dest), 40);
 }
 
 #[test]
@@ -5299,7 +5303,10 @@ fn v16_bpf_cross_margin_positive_pnl_allows_backed_risk_increase_on_negative_leg
             AccountMeta::new(env.vault, false),
             AccountMeta::new_readonly(env.vault_authority, false),
             AccountMeta::new_readonly(spl_token::ID, false),
-        ],
+        
+                // #433: backing-domain ledger is MANDATORY.
+                AccountMeta::new(state::derive_lp_backing_ledger(&env.program_id, &env.market, 1).0, false),
+            ],
         &[&env.admin],
     );
     assert!(
@@ -7149,7 +7156,9 @@ fn v16_bpf_failed_terminal_insurance_withdraw_rolls_back_market_and_ledger() {
 #[test]
 fn v16_bpf_failed_backing_withdraw_transfer_rolls_back_bucket_and_ledger() {
     let mut env = V16CuEnv::new();
-    let ledger = env.backing_domain_ledger_account();
+    // #433: TopUpBackingBucket now pins the ledger to its PDA, so a random-address
+    // ledger is refused. These fixtures want a working top-up, not a substitution test.
+    let ledger = env.canonical_backing_domain_ledger_account(1);
     env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
     let dest = env.token_account(env.admin.pubkey(), 0);
     let mut corrupted_vault = env.svm.get_account(&env.vault).unwrap();
@@ -8422,7 +8431,9 @@ fn v16_bpf_policy_authority_and_base_unit_tags_are_bounded_and_persist() {
 #[test]
 fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     let mut env = V16CuEnv::new();
-    let ledger = env.backing_domain_ledger_account();
+    // #433: TopUpBackingBucket now pins the ledger to its PDA, so a random-address
+    // ledger is refused. These fixtures want a working top-up, not a substitution test.
+    let ledger = env.canonical_backing_domain_ledger_account(1);
     let (backing_source, top_up_cu) =
         env.top_up_backing_bucket_with_ledger_with_cu(ledger, 1, 100, 10);
     assert_cu_within(
@@ -8464,7 +8475,7 @@ fn v16_bpf_accounting_ledger_tags_are_bounded_and_update_state() {
     assert_eq!(group.vault, 110);
 
     let mut pnl_env = V16CuEnv::new();
-    let pnl_ledger = pnl_env.backing_domain_ledger_account();
+    let pnl_ledger = pnl_env.canonical_backing_domain_ledger_account(1);
     pnl_env.top_up_backing_bucket_with_ledger_with_cu(pnl_ledger, 1, 40, 10);
     let owner = Keypair::new();
     let portfolio = pnl_env.create_portfolio(&owner);
@@ -11175,6 +11186,10 @@ fn v17_lapsed_backing_bucket_bricks_settlement_until_expired() {
                 AccountMeta::new(refund_src, false),
                 AccountMeta::new(vault, false),
                 AccountMeta::new_readonly(spl_token::ID, false),
+            
+                // #433: backing-domain ledger is MANDATORY and is CREATED here.
+                AccountMeta::new(state::derive_lp_backing_ledger(&env.program_id, &env.market, 0).0, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
             ],
             &[&admin],
         )
@@ -11770,4 +11785,81 @@ fn control_second_insurance_withdrawal_succeeds_with_no_cooldown_configured() {
         "CONTROL BROKEN — the second withdrawal failed with no cooldown set, so the \
          rejection in the test above cannot be attributed to the policy: {second:?}"
     );
+}
+
+/// THE REGRESSION TEST FOR THE STRANDING. A market with NO LP vault must be able to take
+/// backing out again.
+///
+/// This is the exact shape 45bba89e broke and shipped: it made the ledger mandatory on
+/// `WithdrawBackingBucket` while nothing on that path could CREATE the PDA, so on a market
+/// with no LP vault `expect_owner` failed and deposited backing became unwithdrawable.
+///
+/// BOTH instructions are built BY HAND. Every `V16CuEnv` backing helper routes through
+/// `canonical_backing_domain_ledger_account`, which `set_account`s the ledger into
+/// existence — using any of them makes this test VACUOUS, because the harness creates the
+/// account the program is supposed to create. Two negative-control runs passed against a
+/// build with the creation path deleted before that was spotted.
+#[test]
+fn v16_bpf_backing_topup_then_withdraw_works_without_an_lp_vault() {
+    let mut env = V16CuEnv::new();
+    let ledger = state::derive_lp_backing_ledger(&env.program_id, &env.market, 1).0;
+
+    // PROOF OF LIFE: nothing may have created the ledger yet, or this proves nothing.
+    assert!(
+        env.svm.get_account(&ledger).is_none(),
+        "the ledger PDA must not exist before the top-up"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let pid = env.program_id;
+    let payer = env.payer.insecure_clone();
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+    let source = env.token_account(admin.pubkey(), 100);
+
+    send_tx(
+        &mut env.svm, pid, &payer,
+        ProgInstruction::TopUpBackingBucket { domain: 1, amount: 100, expiry_slot: 10 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("top up must succeed and CREATE the ledger");
+
+    assert!(
+        env.svm.get_account(&ledger).is_some(),
+        "TopUpBackingBucket must have created the backing-domain ledger"
+    );
+
+    env.svm.expire_blockhash();
+    let dest = env.token_account(admin.pubkey(), 0);
+    send_tx(
+        &mut env.svm, pid, &payer,
+        ProgInstruction::WithdrawBackingBucket { domain: 1, amount: 40 },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("backing must be withdrawable from a market with no LP vault — this failing is \
+            the fund-stranding regression of 2026-09-01 returning");
+
+    assert_eq!(env.token_amount(dest), 40);
+    let led = state::read_backing_domain_ledger(&env.svm.get_account(&ledger).unwrap().data).unwrap();
+    assert_eq!(led.total_principal_atoms, 60, "the ledger booked the withdrawal");
+    assert_eq!(led.total_principal_withdrawn_atoms, 40);
 }
