@@ -11863,3 +11863,326 @@ fn v16_bpf_backing_topup_then_withdraw_works_without_an_lp_vault() {
     assert_eq!(led.total_principal_atoms, 60, "the ledger booked the withdrawal");
     assert_eq!(led.total_principal_withdrawn_atoms, 40);
 }
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// #433 LEGACY LEDGERLESS RECONCILIATION
+//
+// These fixtures deliberately DO NOT use any V16CuEnv backing helper.
+// `canonical_backing_domain_ledger_account` set_accounts the ledger into
+// existence, which would make the migration proof vacuous.
+//
+// The state below models a historically valid 100-atom backing deposit after
+// 40 atoms have been consumed:
+//
+//   bucket: fresh=60, consumed=40
+//   source: fresh_reserved=60, spent=40, provider_receivable=40
+//
+// The three consumption counters are kept coherent so the production
+// wrapper's validate_shape() accepts the fixture before committing migration.
+// ════════════════════════════════════════════════════════════════════════════
+
+fn seed_legacy_ledgerless_consumed_backing(
+    env: &mut V16CuEnv,
+    domain: usize,
+    fresh_atoms: u128,
+    consumed_atoms: u128,
+) {
+    let fresh_num = fresh_atoms
+        .checked_mul(BOUND_SCALE)
+        .expect("fresh backing scale");
+    let consumed_num = consumed_atoms
+        .checked_mul(BOUND_SCALE)
+        .expect("consumed backing scale");
+    let total_atoms = fresh_atoms
+        .checked_add(consumed_atoms)
+        .expect("legacy backing total");
+
+    env.mutate_market(|_cfg, group| {
+        let bucket = &mut group.source_backing_buckets[domain];
+        bucket.fresh_unliened_backing_num = fresh_num;
+        bucket.valid_liened_backing_num = 0;
+        bucket.consumed_liened_backing_num = consumed_num;
+        bucket.impaired_liened_backing_num = 0;
+        bucket.utilization_fee_earnings = 0;
+        bucket.expiry_slot = 10;
+        bucket.status = BackingBucketStatusV16::Fresh;
+
+        let source = &mut group.source_credit[domain];
+        source.fresh_reserved_backing_num = fresh_num;
+        source.valid_liened_backing_num = 0;
+        source.impaired_liened_backing_num = 0;
+        source.spent_backing_num = consumed_num;
+        source.provider_receivable_num = consumed_num;
+
+        group.vault = total_atoms;
+
+        // Keep the legacy fixture internally coherent. The production
+        // TopUpBackingBucket path performs the full engine validate_shape()
+        // before committing the migrated state.
+        assert_eq!(
+            source.provider_receivable_num,
+            bucket.consumed_liened_backing_num,
+            "#433 fixture: provider receivable must match consumed backing"
+        );
+        assert!(
+            source.spent_backing_num >= source.provider_receivable_num,
+            "#433 fixture: spent backing must cover provider receivable"
+        );
+        assert_eq!(
+            source.fresh_reserved_backing_num,
+            bucket
+                .fresh_unliened_backing_num
+                .checked_add(bucket.valid_liened_backing_num)
+                .expect("#433 fixture fresh+valid overflow"),
+            "#433 fixture: reserved backing must match fresh+valid backing"
+        );
+        assert_eq!(
+            source.valid_liened_backing_num,
+            bucket.valid_liened_backing_num,
+            "#433 fixture: valid lien counters must agree"
+        );
+        assert_eq!(
+            source.impaired_liened_backing_num,
+            bucket.impaired_liened_backing_num,
+            "#433 fixture: impaired lien counters must agree"
+        );
+    });
+
+    env.set_token_account_amount(
+        env.vault,
+        env.mint,
+        env.vault_authority,
+        u64::try_from(total_atoms).expect("legacy vault amount fits u64"),
+    );
+}
+
+#[test]
+fn v16_bpf_legacy_ledgerless_backing_zero_topup_reconciles_before_withdraw() {
+    const DOMAIN: u16 = 1;
+
+    let mut env = V16CuEnv::new();
+    let ledger =
+        state::derive_lp_backing_ledger(&env.program_id, &env.market, DOMAIN).0;
+
+    // Recreate the pre-e8acd708 state: backing exists, canonical ledger does not.
+    seed_legacy_ledgerless_consumed_backing(&mut env, DOMAIN as usize, 60, 40);
+
+    assert!(
+        env.svm.get_account(&ledger).is_none(),
+        "legacy fixture must not pre-create the canonical ledger"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let payer = env.payer.insecure_clone();
+    let pid = env.program_id;
+    let market = env.market;
+    let vault = env.vault;
+    let vault_authority = env.vault_authority;
+
+    // A provider must not have to add new capital just to make historical
+    // backing withdrawable. Build the migration instruction BY HAND.
+    let zero_source = env.token_account(admin.pubkey(), 0);
+
+    send_tx(
+        &mut env.svm,
+        pid,
+        &payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: DOMAIN,
+            amount: 0,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(zero_source, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("#433 zero-amount top-up must create and reconcile the legacy ledger");
+
+    let ledger_account = env
+        .svm
+        .get_account(&ledger)
+        .expect("migration must create the canonical ledger");
+    let migrated = state::read_backing_domain_ledger(&ledger_account.data)
+        .expect("read reconciled backing ledger");
+
+    assert_eq!(
+        migrated.total_principal_atoms, 100,
+        "migration must reconstruct gross outstanding principal"
+    );
+    assert_eq!(
+        migrated.cumulative_loss_atoms, 40,
+        "pre-existing consumed backing must seed the impairment baseline"
+    );
+    assert_eq!(migrated.cumulative_recovery_atoms, 0);
+    assert_eq!(
+        migrated.last_observed_unavailable_principal_atoms, 40,
+        "migration watermark must match the same pre-existing impairment"
+    );
+    assert_eq!(
+        migrated.total_deposited_atoms, 0,
+        "migration must not invent historical lifetime deposit flow"
+    );
+
+    // The 60 atoms that are actually fresh must remain withdrawable.
+    env.svm.expire_blockhash();
+    let dest = env.token_account(admin.pubkey(), 0);
+
+    send_tx(
+        &mut env.svm,
+        pid,
+        &payer,
+        ProgInstruction::WithdrawBackingBucket {
+            domain: DOMAIN,
+            amount: 60,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(dest, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(vault_authority, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("reconciled legacy fresh backing must be withdrawable");
+
+    assert_eq!(env.token_amount(dest), 60);
+    assert_eq!(env.token_amount(vault), 40);
+
+    let ledger_after = env.svm.get_account(&ledger).unwrap();
+    let ledger_after =
+        state::read_backing_domain_ledger(&ledger_after.data).unwrap();
+
+    assert_eq!(ledger_after.total_principal_atoms, 40);
+    assert_eq!(ledger_after.total_principal_withdrawn_atoms, 60);
+    assert_eq!(ledger_after.cumulative_loss_atoms, 40);
+    assert_eq!(ledger_after.cumulative_recovery_atoms, 0);
+}
+
+#[test]
+fn v16_bpf_legacy_ledgerless_nonzero_topup_does_not_book_refill_as_recovery() {
+    const DOMAIN: u16 = 1;
+
+    let mut env = V16CuEnv::new();
+    let ledger =
+        state::derive_lp_backing_ledger(&env.program_id, &env.market, DOMAIN).0;
+
+    // Pre-existing state: 60 fresh + 40 consumed, with no wrapper ledger.
+    seed_legacy_ledgerless_consumed_backing(&mut env, DOMAIN as usize, 60, 40);
+
+    assert!(
+        env.svm.get_account(&ledger).is_none(),
+        "legacy fixture must start ledgerless"
+    );
+
+    let admin = env.admin.insecure_clone();
+    let payer = env.payer.insecure_clone();
+    let pid = env.program_id;
+    let market = env.market;
+    let vault = env.vault;
+
+    // Build the top-up BY HAND. The new 20 atoms refill 20 atoms of provider
+    // receivable, so consumed falls 40 -> 20 while fresh rises 60 -> 80.
+    let source = env.token_account(admin.pubkey(), 20);
+
+    send_tx(
+        &mut env.svm,
+        pid,
+        &payer,
+        ProgInstruction::TopUpBackingBucket {
+            domain: DOMAIN,
+            amount: 20,
+            expiry_slot: 10,
+        },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(source, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(spl_token::ID, false),
+            AccountMeta::new(ledger, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::ID, false),
+        ],
+        &[&admin],
+    )
+    .expect("#433 legacy top-up must reconcile before booking the new deposit");
+
+    let (_, group) = env.market_state();
+    assert_eq!(
+        group.source_backing_buckets[DOMAIN as usize].fresh_unliened_backing_num,
+        80 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_backing_buckets[DOMAIN as usize].consumed_liened_backing_num,
+        20 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[DOMAIN as usize].provider_receivable_num,
+        20 * BOUND_SCALE
+    );
+    assert_eq!(
+        group.source_credit[DOMAIN as usize].spent_backing_num,
+        40 * BOUND_SCALE
+    );
+
+    let ledger_account = env.svm.get_account(&ledger).unwrap();
+    let migrated =
+        state::read_backing_domain_ledger(&ledger_account.data).unwrap();
+
+    assert_eq!(migrated.total_principal_atoms, 120);
+    assert_eq!(
+        migrated.total_deposited_atoms, 20,
+        "only the post-migration top-up is known lifetime deposit flow"
+    );
+    assert_eq!(
+        migrated.cumulative_loss_atoms, 40,
+        "historical impairment remains the migration baseline"
+    );
+    assert_eq!(
+        migrated.cumulative_recovery_atoms, 0,
+        "new capital refill must not be booked as historical recovery"
+    );
+    assert_eq!(
+        migrated.last_observed_unavailable_principal_atoms, 20,
+        "post-refill unavailable watermark must be re-baselined"
+    );
+
+    // Prove the NEXT normal sync does not manufacture a 20-atom recovery.
+    env.svm.expire_blockhash();
+
+    send_tx(
+        &mut env.svm,
+        pid,
+        &payer,
+        ProgInstruction::SyncBackingDomainLedger { domain: DOMAIN },
+        vec![
+            AccountMeta::new(admin.pubkey(), true),
+            AccountMeta::new(market, false),
+            AccountMeta::new(ledger, false),
+        ],
+        &[&admin],
+    )
+    .expect("post-migration ledger sync must succeed");
+
+    let synced_account = env.svm.get_account(&ledger).unwrap();
+    let synced =
+        state::read_backing_domain_ledger(&synced_account.data).unwrap();
+
+    assert_eq!(synced.total_principal_atoms, 120);
+    assert_eq!(synced.cumulative_loss_atoms, 40);
+    assert_eq!(
+        synced.cumulative_recovery_atoms, 0,
+        "the 20-atom capital refill must remain invisible to recovery accounting"
+    );
+    assert_eq!(synced.last_observed_unavailable_principal_atoms, 20);
+}
