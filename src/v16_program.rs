@@ -10077,6 +10077,43 @@ pub mod processor {
             .ok_or(PercolatorError::EngineArithmeticOverflow.into())
     }
 
+    /// #433: reconstruct the accounting baseline for a backing domain that
+    /// was funded before its canonical BackingDomainLedger existed.
+    ///
+    /// This is deliberately migration-specific. `read_or_new_backing_domain_ledger`
+    /// must keep its zero-principal semantics for other callers (notably LP-vault
+    /// accounting, where an uninitialized ledger means that vault has not funded
+    /// the domain).
+    fn seed_legacy_backing_domain_ledger(
+        ledger: &mut state::BackingDomainLedgerAccountV16,
+        bucket: &percolator::BackingBucketV16,
+    ) -> ProgramResult {
+        let gross_principal_num = bucket
+            .fresh_unliened_backing_num
+            .checked_add(bucket.valid_liened_backing_num)
+            .and_then(|v| v.checked_add(bucket.consumed_liened_backing_num))
+            .and_then(|v| v.checked_add(bucket.impaired_liened_backing_num))
+            .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+
+        let gross_principal_atoms = gross_principal_num / BOUND_SCALE;
+        let unavailable_atoms = backing_unavailable_principal_atoms(bucket)?;
+
+        // Seed principal and impairment together. Seeding principal alone would
+        // make consumed/impaired backing appear available under:
+        //
+        // available = principal - (loss - recovery)
+        ledger.total_principal_atoms = gross_principal_atoms;
+        ledger.cumulative_loss_atoms = unavailable_atoms;
+        ledger.cumulative_recovery_atoms = 0;
+
+        // The unavailable amount above is a migration baseline, not a newly
+        // observed loss. Pin the watermark to the same snapshot so the first
+        // normal sync cannot book it again.
+        ledger.last_observed_unavailable_principal_atoms = unavailable_atoms;
+
+        Ok(())
+    }
+
     fn sync_backing_domain_ledger(
         ledger: &mut state::BackingDomainLedgerAccountV16,
         bucket: &percolator::BackingBucketV16,
@@ -10535,7 +10572,11 @@ pub mod processor {
                     domain,
                     &bucket,
                 )?;
-                sync_backing_domain_ledger(&mut ledger, &bucket)?;
+                if initialized {
+                    sync_backing_domain_ledger(&mut ledger, &bucket)?;
+                } else {
+                    seed_legacy_backing_domain_ledger(&mut ledger, &bucket)?;
+                }
                 Some((ledger, initialized))
             } else {
                 None
@@ -10543,7 +10584,7 @@ pub mod processor {
             group
                 .deposit_fresh_counterparty_backing_not_atomic(domain_usize, amount, expiry_slot)
                 .map_err(map_v16_error)?;
-            if let Some((ledger, _)) = ledger_state.as_mut() {
+            if let Some((ledger, initialized)) = ledger_state.as_mut() {
                 ledger.total_principal_atoms = ledger
                     .total_principal_atoms
                     .checked_add(amount)
@@ -10552,6 +10593,18 @@ pub mod processor {
                     .total_deposited_atoms
                     .checked_add(amount)
                     .ok_or(PercolatorError::EngineArithmeticOverflow)?;
+
+                // #433 migration only. A top-up may satisfy provider receivable
+                // and reduce consumed backing. For a ledger reconstructed from
+                // the PRE-top-up bucket, that reduction is new capital refill,
+                // not a newly observed recovery. Re-baseline it so the next
+                // sync cannot count the refill twice.
+                if !*initialized {
+                    let (_, bucket_after) =
+                        backing_domain_parts_view(&group, domain as usize)?;
+                    ledger.last_observed_unavailable_principal_atoms =
+                        backing_unavailable_principal_atoms(&bucket_after)?;
+                }
             }
             group.validate_shape().map_err(map_v16_error)?;
             if let (Some(data), Some((ledger, initialized))) =
@@ -10560,6 +10613,33 @@ pub mod processor {
                 write_or_init_backing_domain_ledger(data, ledger, *initialized)?;
             }
         }
+        if amount == 0 {
+            let mut market_data = market_ai.try_borrow_mut_data()?;
+            let (cfg, group) = state::market_view_mut(&mut market_data)?;
+            let authorities = domain_authorities_from_view(&group, &cfg, domain_usize)?;
+            expect_live_authority(&authorities.backing_bucket_authority, signer.key)?;
+
+            let mut ledger_data = ledger_ai.try_borrow_mut_data()?;
+            if !state::is_initialized(&ledger_data) {
+                let (_, bucket) = backing_domain_parts_view(&group, domain_usize)?;
+                let (mut ledger, initialized) = read_or_new_backing_domain_ledger(
+                    &ledger_data,
+                    market_ai.key.to_bytes(),
+                    authorities.backing_bucket_authority,
+                    domain,
+                    &bucket,
+                )?;
+
+                seed_legacy_backing_domain_ledger(&mut ledger, &bucket)?;
+                group.validate_shape().map_err(map_v16_error)?;
+                write_or_init_backing_domain_ledger(
+                    &mut ledger_data,
+                    &ledger,
+                    initialized,
+                )?;
+            }
+        }
+
         transfer_tokens(token_program, source_token, vault_token, signer, amount_u64)?;
         Ok(())
     }
